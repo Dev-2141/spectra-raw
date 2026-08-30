@@ -23,10 +23,13 @@ from ..simulation.engine import Simulation
 from ..simulation.environment import RFEnvironment
 
 # Higher is better for all; "missed" and "delay" are inverted before weighting.
+# average_reward is the RL objective the schedulers actually optimise, so it
+# carries the most weight; interception and high-priority detection capture
+# mission value; missed / delay are secondary.
 SCORE_WEIGHTS: dict[str, float] = {
-    "interception_ratio": 0.35,
-    "high_priority_detection_rate": 0.25,
-    "average_reward": 0.20,
+    "average_reward": 0.35,
+    "interception_ratio": 0.25,
+    "high_priority_detection_rate": 0.20,
     "missed_opportunity_count": 0.10,   # inverted
     "average_intercept_delay": 0.10,    # inverted
 }

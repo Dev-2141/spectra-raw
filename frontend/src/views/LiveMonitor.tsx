@@ -1,11 +1,18 @@
 import type { SimControls } from "../useSim";
 import { LineChart, SpectrumChart, Waterfall } from "../charts";
-import { Badge, Empty, OutcomeTag, Panel, Stat } from "../ui";
+import { Badge, Empty, ErrorBanner, Loading, OutcomeTag, Panel, Stat } from "../ui";
 import type { SimState } from "../api";
 
 export default function LiveMonitor({ sim }: { sim: SimControls }) {
   const s = sim.state;
-  if (!s) return <Empty>connecting to backend…</Empty>;
+  if (!s)
+    return sim.error ? (
+      <div className="p-3">
+        <ErrorBanner message={sim.error} onRetry={sim.refresh} />
+      </div>
+    ) : (
+      <Loading label="connecting to backend…" />
+    );
   const m = s.metrics;
   const last = s.last_step ?? null;
 

@@ -123,6 +123,7 @@ export interface SimState {
   scheduler: string;
   available_schedulers: string[];
   dataset_id: string | null;
+  preset: string | null;
   replay_mode: boolean;
   environment: {
     num_bands: number;
@@ -252,6 +253,7 @@ export interface RunReport {
   generated_at: string;
   scheduler: string;
   dataset_id: string | null;
+  preset: string | null;
   replay_mode: boolean;
   environment_config: EnvironmentConfig;
   receiver_config: ReceiverConfig;
@@ -263,10 +265,18 @@ export interface RunReport {
 }
 
 export interface ResetBody {
+  preset?: string;
   environment?: Partial<EnvironmentConfig>;
   receiver?: Partial<ReceiverConfig>;
   scheduler?: string;
   scheduler_params?: Record<string, unknown>;
+}
+
+export interface Preset {
+  name: string;
+  description: string;
+  environment: EnvironmentConfig;
+  receiver: ReceiverConfig;
 }
 
 // --------------------------------------------------------------------------- //
@@ -275,6 +285,7 @@ export const api = {
   state: () => jget<SimState>("/api/state"),
   schedulers: () =>
     jget<{ schedulers: string[]; learning_schedulers: string[] }>("/api/schedulers"),
+  presets: () => jget<{ presets: Preset[] }>("/api/presets"),
 
   reset: (body: ResetBody) => jpost<SimState>("/api/simulation/reset", body),
   step: (count = 1) => jpost<SimState>("/api/simulation/step", { count }),

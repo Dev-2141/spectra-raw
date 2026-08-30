@@ -160,6 +160,50 @@ export function Empty({ children }: { children: ReactNode }) {
   );
 }
 
+export function Spinner({ label }: { label?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] text-rf-dim">
+      <span className="h-3 w-3 animate-spin rounded-full border border-rf-border border-t-rf-accent" />
+      {label}
+    </span>
+  );
+}
+
+export function Loading({ label = "loading…" }: { label?: string }) {
+  return (
+    <div className="grid h-full min-h-[60px] place-items-center">
+      <Spinner label={label} />
+    </div>
+  );
+}
+
+export function LoadingBar({ visible }: { visible: boolean }) {
+  return (
+    <div className="h-0.5 w-full overflow-hidden bg-transparent">
+      {visible && <div className="h-full w-1/3 animate-[loadbar_1s_ease-in-out_infinite] bg-rf-accent" />}
+    </div>
+  );
+}
+
+export function ErrorBanner({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 rounded border border-rf-alert/40 bg-rf-alert/10 px-2 py-1 text-[11px] text-rf-alert">
+      <span className="truncate">{message}</span>
+      {onRetry && (
+        <button onClick={onRetry} className="shrink-0 underline hover:no-underline">
+          retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Badge({
   children,
   tone = "dim",

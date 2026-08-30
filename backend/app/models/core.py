@@ -65,6 +65,14 @@ class RFEnvironmentConfig(BaseModel):
     high_priority_fraction: float = Field(
         0.15, ge=0.0, le=1.0, description="Fraction of emitters flagged high priority."
     )
+    behavior_weights: Optional[dict[str, float]] = Field(
+        None,
+        description=(
+            "Optional emitter-behavior sampling weights, e.g. "
+            '{"hopping": 0.6, "burst": 0.2, "priority": 0.2}. Missing behaviors '
+            "get weight 0. Falls back to the built-in mix when omitted."
+        ),
+    )
     seed: int = Field(1234, description="Master RNG seed for reproducibility.")
 
 
@@ -191,6 +199,9 @@ class SimulationStepResult(BaseModel):
 class ResetRequest(BaseModel):
     """Body for POST /api/simulation/reset."""
 
+    preset: Optional[str] = Field(
+        None, description="Load a named scenario preset as the base config."
+    )
     environment: Optional[RFEnvironmentConfig] = None
     receiver: Optional[ReceiverConfig] = None
     scheduler: str = "round_robin"
@@ -293,6 +304,9 @@ class DatasetGenerateRequest(BaseModel):
     """Body for POST /api/dataset/generate."""
 
     name: Optional[str] = None
+    preset: Optional[str] = Field(
+        None, description="Generate from a named scenario preset's environment."
+    )
     config: Optional[RFEnvironmentConfig] = None
 
 

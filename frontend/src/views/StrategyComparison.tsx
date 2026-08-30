@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ALL_SCHEDULERS, api, type ComparisonReport } from "../api";
 import { BarChart, LineChart, SERIES_COLORS } from "../charts";
-import { Badge, Btn, Empty, Panel } from "../ui";
+import { Badge, Btn, Empty, ErrorBanner, Loading, Panel } from "../ui";
 
 const DEFAULT = ["round_robin", "random", "priority", "epsilon_bandit", "ucb_bandit", "q_learning"];
 
@@ -63,10 +63,16 @@ export default function StrategyComparison() {
             </span>
           )}
         </div>
-        {error && <p className="mt-1 text-[10px] text-rf-alert">{error}</p>}
+        {error && (
+          <div className="mt-1">
+            <ErrorBanner message={error} onRetry={run} />
+          </div>
+        )}
       </Panel>
 
-      {!report ? (
+      {busy && !report ? (
+        <Loading label={`running ${selected.length} schedulers × ${steps} steps…`} />
+      ) : !report ? (
         <Empty>configure the set and run a comparison</Empty>
       ) : (
         <>

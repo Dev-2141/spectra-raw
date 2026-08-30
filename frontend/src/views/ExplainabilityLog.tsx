@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ExplainRow } from "../api";
-import { Badge, Btn, Empty, OutcomeTag, Panel } from "../ui";
+import { Badge, Btn, Empty, ErrorBanner, OutcomeTag, Panel } from "../ui";
 
 export default function ExplainabilityLog() {
   const [rows, setRows] = useState<ExplainRow[]>([]);
@@ -48,7 +48,11 @@ export default function ExplainabilityLog() {
           ))}
           <span className="ml-auto text-[10px] text-rf-dim">{shown.length} rows</span>
         </div>
-        {error && <p className="mt-1 text-[10px] text-rf-alert">{error}</p>}
+        {error && (
+          <div className="mt-1">
+            <ErrorBanner message={error} onRetry={refresh} />
+          </div>
+        )}
       </Panel>
 
       <Panel title="Decisions (newest first)" className="min-h-0 flex-1">

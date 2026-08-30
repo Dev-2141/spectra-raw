@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type DatasetMeta } from "../api";
 import { Waterfall } from "../charts";
-import { Badge, Btn, Empty, Field, Panel } from "../ui";
+import { Badge, Btn, Empty, ErrorBanner, Field, Loading, Panel } from "../ui";
 import type { SimControls } from "../useSim";
 
 export default function DatasetLab({ sim }: { sim: SimControls }) {
@@ -87,7 +87,11 @@ export default function DatasetLab({ sim }: { sim: SimControls }) {
               {busy ? "working…" : "generate"}
             </Btn>
           </div>
-          {error && <p className="mt-1 text-[10px] text-rf-alert">{error}</p>}
+          {error && (
+            <div className="mt-1">
+              <ErrorBanner message={error} onRetry={refresh} />
+            </div>
+          )}
         </Panel>
 
         <Panel title={`Datasets (${list.length})`} className="min-h-0 flex-1">
@@ -159,7 +163,7 @@ export default function DatasetLab({ sim }: { sim: SimControls }) {
               {preview ? (
                 <Waterfall power={preview.power_db} startSlot={0} scanPath={[]} height={300} />
               ) : (
-                <Empty>loading preview…</Empty>
+                <Loading label="loading preview…" />
               )}
             </Panel>
           </div>

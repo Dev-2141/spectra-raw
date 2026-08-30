@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ComparisonReport, type RunReport } from "../api";
-import { Badge, Empty, Panel, Stat } from "../ui";
+import { Badge, Empty, ErrorBanner, Loading, Panel, Stat } from "../ui";
 
 export default function Reports() {
   const [run, setRun] = useState<RunReport | null>(null);
@@ -37,12 +37,17 @@ export default function Reports() {
         }
       >
         {!run ? (
-          <Empty>{error ?? "loading…"}</Empty>
+          error ? (
+            <ErrorBanner message={error} onRetry={refresh} />
+          ) : (
+            <Loading />
+          )
         ) : (
           <div className="space-y-2">
             <div className="flex flex-wrap gap-1.5 text-[10px] text-rf-dim">
               <Badge>{run.generated_at}</Badge>
               <Badge tone="scan">{run.scheduler}</Badge>
+              {run.preset && <Badge tone="good">{run.preset}</Badge>}
               {run.replay_mode && <Badge tone="warn">replay {run.dataset_id}</Badge>}
               <Badge>
                 {run.environment_config.num_bands} bands · seed {run.environment_config.seed}

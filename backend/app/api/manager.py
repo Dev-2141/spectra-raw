@@ -29,6 +29,7 @@ from ..models.core import (
 )
 from ..schedulers.registry import create_scheduler, list_schedulers
 from ..simulation.engine import Simulation
+from ..simulation.presets import get_preset, list_presets
 
 WATERFALL_SLOTS = 160
 SCAN_PATH_LEN = 240
@@ -47,9 +48,14 @@ class SimulationManager:
         self._env_config = RFEnvironmentConfig()
         self._receiver_config = ReceiverConfig()
         self._dataset_id: str | None = None
+        self._preset_name: str | None = None
         self._last_comparison: ComparisonReport | None = None
         self._training_runs: list[TrainingReport] = []
         self.reset(ResetRequest())
+
+    # ------------------------------------------------------------------ #
+    def presets(self) -> list[dict]:
+        return list_presets()
 
     # ------------------------------------------------------------------ #
     @property
@@ -61,10 +67,19 @@ class SimulationManager:
 
     def reset(self, req: ResetRequest) -> dict:
         with self._lock:
+            if req.preset is not None:
+                # A preset is an explicit base config -> exits replay mode.
+                env_cfg, rcv_cfg = get_preset(req.preset)
+                self._env_config = env_cfg
+                self._receiver_config = rcv_cfg
+                self._preset_name = req.preset
+                self._dataset_id = None
             if req.environment is not None:
                 # Explicit env config exits dataset-replay mode.
                 self._env_config = req.environment
                 self._dataset_id = None
+                if req.preset is None:
+                    self._preset_name = None
             if req.receiver is not None:
                 self._receiver_config = req.receiver
             self._scheduler_name = req.scheduler or self._scheduler_name
@@ -88,7 +103,12 @@ class SimulationManager:
     # ------------------------------------------------------------------ #
     def generate_dataset(self, req: DatasetGenerateRequest) -> dict:
         with self._lock:
-            cfg = req.config or self._env_config
+            if req.config is not None:
+                cfg = req.config
+            elif req.preset is not None:
+                cfg, _ = get_preset(req.preset)
+            else:
+                cfg = self._env_config
             meta, arrays = build_dataset(cfg, name=req.name)
             meta = get_store().save(meta, arrays)
             return meta.model_dump()
@@ -107,6 +127,7 @@ class SimulationManager:
             store = get_store()
             store.get(dataset_id)  # raises KeyError if missing
             self._dataset_id = dataset_id
+            self._preset_name = None
             self._env_config = store.config_for(dataset_id)
             if req.receiver is not None:
                 self._receiver_config = req.receiver
@@ -310,6 +331,7 @@ class SimulationManager:
                 "generated_at": _utc_now(),
                 "scheduler": sim.scheduler_name,
                 "dataset_id": self._dataset_id,
+                "preset": self._preset_name,
                 "replay_mode": bool(getattr(sim.env, "replayed", False)),
                 "environment_config": self._env_config.model_dump(),
                 "receiver_config": self._receiver_config.model_dump(),
@@ -361,6 +383,7 @@ class SimulationManager:
                 "scheduler": sim.scheduler_name,
                 "available_schedulers": list_schedulers(),
                 "dataset_id": self._dataset_id,
+                "preset": self._preset_name,
                 "replay_mode": bool(getattr(env, "replayed", False)),
                 "environment": {
                     "num_bands": env.num_bands,

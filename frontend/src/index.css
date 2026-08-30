@@ -32,3 +32,12 @@ body {
   background: #1e2a3a;
   border-radius: 4px;
 }
+
+@keyframes loadbar {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}

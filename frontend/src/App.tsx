@@ -1,5 +1,6 @@
 import { useState } from "react";
 import ControlSidebar from "./ControlSidebar";
+import { LoadingBar } from "./ui";
 import { useSim } from "./useSim";
 import LiveMonitor from "./views/LiveMonitor";
 import StrategyComparison from "./views/StrategyComparison";
@@ -62,6 +63,7 @@ export default function App() {
           </span>
         </span>
       </header>
+      <LoadingBar visible={sim.busy} />
 
       <div className="flex min-h-0 flex-1">
         <ControlSidebar sim={sim} />
@@ -80,6 +82,7 @@ export default function App() {
           {s
             ? `${s.environment.num_bands} bands · ${s.environment.emitter_count} emitters · occ ${(s.environment.occupancy_percentage * 100).toFixed(1)}% · noise ${s.environment.noise_floor_db} dB · seed ${s.environment.seed}`
             : "—"}
+          {s?.preset ? `  ·  scenario: ${s.preset}` : ""}
           {sim.error ? `  ·  ${sim.error}` : ""}
         </span>
         <span>

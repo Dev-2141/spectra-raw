@@ -39,6 +39,11 @@ def schedulers() -> dict:
     }
 
 
+@router.get("/presets")
+def presets() -> dict:
+    return {"presets": get_manager().presets()}
+
+
 @router.get("/state")
 def state() -> dict:
     return get_manager().state()

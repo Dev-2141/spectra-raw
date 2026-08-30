@@ -119,7 +119,16 @@ class RFEnvironment:
         cfg = self.config
         n_emitters = max(1, int(round(cfg.emitter_density * self.num_bands)))
         behaviors = list(_BEHAVIOR_WEIGHTS.keys())
-        probs = np.array([_BEHAVIOR_WEIGHTS[b] for b in behaviors], dtype=float)
+        if cfg.behavior_weights:
+            raw = [
+                max(0.0, float(cfg.behavior_weights.get(b.value, 0.0)))
+                for b in behaviors
+            ]
+            if sum(raw) <= 0.0:
+                raw = [_BEHAVIOR_WEIGHTS[b] for b in behaviors]
+            probs = np.array(raw, dtype=float)
+        else:
+            probs = np.array([_BEHAVIOR_WEIGHTS[b] for b in behaviors], dtype=float)
         probs /= probs.sum()
 
         home_bands = self.rng.permutation(self.num_bands)[:n_emitters]

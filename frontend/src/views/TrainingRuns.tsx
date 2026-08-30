@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type TrainingReport } from "../api";
 import { LineChart } from "../charts";
-import { Badge, Btn, Empty, Panel, Select } from "../ui";
+import { Badge, Btn, Empty, ErrorBanner, Loading, Panel, Select } from "../ui";
 
 const LEARNERS = ["q_learning", "epsilon_bandit", "ucb_bandit", "thompson", "priority"];
 
@@ -58,10 +58,11 @@ export default function TrainingRuns() {
             <Btn active onClick={train} disabled={busy}>
               {busy ? "training…" : "train"}
             </Btn>
+            {busy && <Loading label={`training ${episodes} episodes…`} />}
             <p className="text-[10px] text-rf-dim">
               Environment seed varies per episode; the learner keeps its Q-table / arm values across episodes.
             </p>
-            {error && <p className="text-[10px] text-rf-alert">{error}</p>}
+            {error && <ErrorBanner message={error} onRetry={refresh} />}
           </div>
         </Panel>
 

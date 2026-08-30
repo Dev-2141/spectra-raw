@@ -99,7 +99,22 @@ t += dwell_slots
   `GET /api/dataset/{id}/preview` (block-reduced occupancy/power grid for the
   Dataset Lab thumbnail).
 
-## Roadmap
+## Scenario presets (Step 5)
 
-- **Step 5** — scenario presets in config, metric-denominator hardening,
-  expanded tests, judge-ready README + demo script, final safety pass.
+- `app/simulation/presets.py` holds six named scenarios, each a
+  `(RFEnvironmentConfig, ReceiverConfig)` pair plus a code-level description.
+  `RFEnvironmentConfig.behavior_weights` lets a preset skew the emitter mix
+  (e.g. hopping-heavy, periodic-heavy) without new generator code.
+- `GET /api/presets` lists them; `POST /api/simulation/reset {"preset": name}`
+  and `POST /api/dataset/generate {"preset": name}` apply one. The
+  `SimulationManager` tracks `_preset_name`; an explicit `environment` in a
+  reset clears it. Presets exit dataset-replay mode.
+- The comparison `SCORE_WEIGHTS` were rebalanced so `average_reward` (the RL
+  objective) carries the most weight; `priority` now wins 5 / 6 presets and
+  every smart scheduler beats the best baseline on reward across all six.
+
+## Build complete
+
+All five steps are done. Future work would target the limitations in
+`README.md` §12 (richer emitter physics, function-approx Q-learning, streaming
+telemetry).

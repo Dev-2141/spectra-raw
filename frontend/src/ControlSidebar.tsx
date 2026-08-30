@@ -1,25 +1,7 @@
 import { useEffect, useState } from "react";
+import { api, type Preset } from "./api";
 import type { SimControls } from "./useSim";
-import { Badge, Btn, Field, Panel, Select } from "./ui";
-
-const PRESETS: Record<string, { env: Record<string, number>; rcv: Record<string, number> }> = {
-  "default 64-band": {
-    env: { num_bands: 64, num_time_slots: 1000, emitter_density: 0.15, noise_floor_db: -100, seed: 1234 },
-    rcv: { detection_threshold_db: 6, dwell_slots: 1, retune_delay_slots: 1 },
-  },
-  "dense emitters": {
-    env: { num_bands: 64, num_time_slots: 1000, emitter_density: 0.4, noise_floor_db: -100, seed: 7 },
-    rcv: { detection_threshold_db: 6, dwell_slots: 1, retune_delay_slots: 1 },
-  },
-  "sparse / low-duty": {
-    env: { num_bands: 96, num_time_slots: 1200, emitter_density: 0.08, noise_floor_db: -100, seed: 21 },
-    rcv: { detection_threshold_db: 5, dwell_slots: 1, retune_delay_slots: 1 },
-  },
-  "noisy spectrum": {
-    env: { num_bands: 64, num_time_slots: 1000, emitter_density: 0.2, noise_floor_db: -92, seed: 99 },
-    rcv: { detection_threshold_db: 8, dwell_slots: 1, retune_delay_slots: 2 },
-  },
-};
+import { Badge, Btn, ErrorBanner, Field, Panel, Select } from "./ui";
 
 export default function ControlSidebar({ sim }: { sim: SimControls }) {
   const { state } = sim;
@@ -31,12 +13,20 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
   const [threshold, setThreshold] = useState(6);
   const [dwell, setDwell] = useState(1);
   const [retune, setRetune] = useState(1);
-  const [scheduler, setScheduler] = useState("priority");
+  const [scheduler, setScheduler] = useState("round_robin");
+  const [presets, setPresets] = useState<Preset[]>([]);
 
-  // Sync form once from the live state on first load.
-  const [synced, setSynced] = useState(false);
   useEffect(() => {
-    if (synced || !state) return;
+    api
+      .presets()
+      .then((r) => setPresets(r.presets))
+      .catch(() => setPresets([]));
+  }, []);
+
+  // Mirror the live config into the form whenever it changes server-side
+  // (first load, preset applied, dataset loaded, apply & reset).
+  useEffect(() => {
+    if (!state) return;
     setBands(state.environment.num_bands);
     setDensity(state.environment.emitter_density);
     setNoise(state.environment.noise_floor_db);
@@ -45,9 +35,21 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
     setThreshold(state.receiver.detection_threshold_db);
     setDwell(state.receiver.dwell_slots);
     setRetune(state.receiver.retune_delay_slots);
-    setScheduler(state.scheduler);
-    setSynced(true);
-  }, [state, synced]);
+  }, [
+    state?.environment.num_bands,
+    state?.environment.emitter_density,
+    state?.environment.noise_floor_db,
+    state?.environment.num_time_slots,
+    state?.environment.seed,
+    state?.receiver.detection_threshold_db,
+    state?.receiver.dwell_slots,
+    state?.receiver.retune_delay_slots,
+    state,
+  ]);
+
+  useEffect(() => {
+    if (state?.scheduler) setScheduler(state.scheduler);
+  }, [state?.scheduler]);
 
   const applyReset = () =>
     sim.reset({
@@ -66,26 +68,20 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
       scheduler,
     });
 
-  const applyPreset = (name: string) => {
-    const p = PRESETS[name];
-    if (!p) return;
-    setBands(p.env.num_bands);
-    setSlots(p.env.num_time_slots);
-    setDensity(p.env.emitter_density);
-    setNoise(p.env.noise_floor_db);
-    setSeed(p.env.seed);
-    setThreshold(p.rcv.detection_threshold_db);
-    setDwell(p.rcv.dwell_slots);
-    setRetune(p.rcv.retune_delay_slots);
-  };
+  const applyPreset = (name: string) => sim.reset({ preset: name, scheduler });
 
   const disabled = sim.busy;
+  const activePreset = presets.find((p) => p.name === state?.preset);
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col gap-2 overflow-y-auto border-r border-rf-border bg-rf-panel2 p-2">
       <Panel title="Transport">
         <div className="flex flex-wrap gap-1.5">
-          <Btn onClick={sim.playing ? sim.pause : sim.play} active={sim.playing} disabled={disabled && !sim.playing}>
+          <Btn
+            onClick={sim.playing ? sim.pause : sim.play}
+            active={sim.playing}
+            disabled={disabled && !sim.playing}
+          >
             {sim.playing ? "❚❚ pause" : "▶ play"}
           </Btn>
           <Btn onClick={sim.stepOnce} disabled={disabled}>
@@ -110,11 +106,12 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
           />
           <span className="tabular-nums text-rf-text">{sim.speed}/tick</span>
         </label>
-        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-rf-dim">
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-rf-dim">
           <span>
             t={state?.time_slot ?? 0}/{state?.max_slots ?? 0}
           </span>
           {state?.replay_mode && <Badge tone="scan">replay {state.dataset_id}</Badge>}
+          {state?.preset && <Badge tone="good">{state.preset}</Badge>}
           {state?.done && <Badge tone="warn">done</Badge>}
         </div>
       </Panel>
@@ -128,6 +125,28 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
         <p className="mt-1 text-[10px] text-rf-dim">
           active: <span className="text-rf-text">{state?.scheduler ?? "—"}</span>
         </p>
+      </Panel>
+
+      <Panel title="Scenario presets">
+        <div className="flex flex-col gap-1">
+          {presets.length === 0 && <span className="text-[10px] text-rf-dim">—</span>}
+          {presets.map((p) => (
+            <Btn
+              key={p.name}
+              onClick={() => applyPreset(p.name)}
+              disabled={disabled}
+              active={state?.preset === p.name}
+              title={p.description}
+            >
+              {p.name}
+            </Btn>
+          ))}
+        </div>
+        {activePreset && (
+          <p className="mt-1.5 text-[10px] leading-relaxed text-rf-dim">
+            {activePreset.description}
+          </p>
+        )}
       </Panel>
 
       <Panel title="Environment">
@@ -148,16 +167,6 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
         </div>
       </Panel>
 
-      <Panel title="Presets">
-        <div className="flex flex-col gap-1">
-          {Object.keys(PRESETS).map((p) => (
-            <Btn key={p} onClick={() => applyPreset(p)} disabled={disabled}>
-              {p}
-            </Btn>
-          ))}
-        </div>
-      </Panel>
-
       <div className="sticky bottom-0 flex gap-1.5 bg-rf-panel2 pt-1">
         <Btn onClick={applyReset} disabled={disabled} active>
           apply &amp; reset
@@ -166,11 +175,7 @@ export default function ControlSidebar({ sim }: { sim: SimControls }) {
           refresh
         </Btn>
       </div>
-      {sim.error && (
-        <p className="rounded border border-rf-alert/40 bg-rf-alert/10 p-1 text-[10px] text-rf-alert">
-          {sim.error}
-        </p>
-      )}
+      {sim.error && <ErrorBanner message={sim.error} onRetry={sim.refresh} />}
     </aside>
   );
 }
