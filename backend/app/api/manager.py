@@ -7,6 +7,7 @@ the JSON snapshots the frontend renders.
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -33,6 +34,10 @@ WATERFALL_SLOTS = 160
 SCAN_PATH_LEN = 240
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class SimulationManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -43,6 +48,7 @@ class SimulationManager:
         self._receiver_config = ReceiverConfig()
         self._dataset_id: str | None = None
         self._last_comparison: ComparisonReport | None = None
+        self._training_runs: list[TrainingReport] = []
         self.reset(ResetRequest())
 
     # ------------------------------------------------------------------ #
@@ -249,7 +255,70 @@ class SimulationManager:
                 reward_improvement=round(last - first, 4),
                 best_episode=best + 1,
             )
+            self._training_runs.append(report)
+            del self._training_runs[:-25]
             return report.model_dump()
+
+    def training_runs(self) -> list[dict]:
+        with self._lock:
+            return [r.model_dump() for r in reversed(self._training_runs)]
+
+    def last_training(self) -> dict | None:
+        with self._lock:
+            return self._training_runs[-1].model_dump() if self._training_runs else None
+
+    # ------------------------------------------------------------------ #
+    def explainability_log(self, limit: int = 200) -> list[dict]:
+        """Recent scheduler decisions with their reasoning, newest last."""
+        with self._lock:
+            rows: list[dict] = []
+            for r in self.sim.history[-limit:]:
+                d, det = r.decision, r.detection
+                if det.detected and det.true_active:
+                    outcome = "hit"
+                elif det.false_alarm:
+                    outcome = "false_alarm"
+                elif det.true_active:
+                    outcome = "miss"
+                else:
+                    outcome = "empty"
+                rows.append(
+                    {
+                        "time_slot": r.time_slot,
+                        "scheduler": d.scheduler,
+                        "selected_band": d.selected_band,
+                        "confidence": d.confidence,
+                        "predicted_active": d.predicted_active,
+                        "reward": r.reward,
+                        "outcome": outcome,
+                        "reasons": d.reasons,
+                        "alternatives": d.alternatives,
+                        "explanation": d.explanation,
+                        "reward_breakdown": r.reward_breakdown,
+                    }
+                )
+            return rows
+
+    def run_report(self) -> dict:
+        """Snapshot of the current run: config + final metrics + recent decisions."""
+        with self._lock:
+            sim = self.sim
+            m = sim.metrics_snapshot()
+            return {
+                "product": "SPECTRA-SCAN AI",
+                "mode": "simulation-only / receive-only",
+                "generated_at": _utc_now(),
+                "scheduler": sim.scheduler_name,
+                "dataset_id": self._dataset_id,
+                "replay_mode": bool(getattr(sim.env, "replayed", False)),
+                "environment_config": self._env_config.model_dump(),
+                "receiver_config": self._receiver_config.model_dump(),
+                "time_slot": sim.t,
+                "max_slots": sim.env.num_time_slots,
+                "steps_run": len(sim.history),
+                "metrics": m.model_dump(),
+                "recent_decisions": self.explainability_log(limit=10),
+            }
 
     # ------------------------------------------------------------------ #
     def state(self) -> dict:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Response
 
 from ..comparison.export import report_to_csv, report_to_html
+from ..reporting import run_report_to_csv, run_report_to_html
 from ..models.core import (
     ComparisonRequest,
     DatasetGenerateRequest,
@@ -115,6 +116,16 @@ def dataset_stats(dataset_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/dataset/{dataset_id}/preview")
+def dataset_preview(dataset_id: str) -> dict:
+    from ..dataset.store import get_store
+
+    try:
+        return get_store().preview(dataset_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/dataset/{dataset_id}/load")
 def dataset_load(dataset_id: str, req: DatasetLoadRequest | None = None) -> dict:
     try:
@@ -140,6 +151,52 @@ def comparison_last() -> dict:
     if rep is None:
         raise HTTPException(status_code=404, detail="no comparison has been run yet")
     return rep.model_dump()
+
+
+@router.get("/explainability/log")
+def explainability_log(limit: int = 200) -> dict:
+    limit = max(1, min(2000, limit))
+    return {"log": get_manager().explainability_log(limit)}
+
+
+@router.get("/training/runs")
+def training_runs() -> dict:
+    return {"runs": get_manager().training_runs()}
+
+
+@router.get("/training/last")
+def training_last() -> dict:
+    last = get_manager().last_training()
+    if last is None:
+        raise HTTPException(status_code=404, detail="no training run yet")
+    return last
+
+
+@router.get("/report/run")
+def report_run() -> dict:
+    return get_manager().run_report()
+
+
+@router.get("/report/run/export/{fmt}")
+def report_run_export(fmt: str) -> Response:
+    report = get_manager().run_report()
+    if fmt == "json":
+        import json
+
+        return Response(
+            json.dumps(report, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=run_report.json"},
+        )
+    if fmt == "csv":
+        return Response(
+            run_report_to_csv(report),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=run_report.csv"},
+        )
+    if fmt == "html":
+        return Response(run_report_to_html(report), media_type="text/html")
+    raise HTTPException(status_code=400, detail="format must be json, csv, or html")
 
 
 @router.get("/comparison/export/{fmt}")

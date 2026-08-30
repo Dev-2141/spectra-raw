@@ -80,7 +80,26 @@ t += dwell_slots
 - `app/comparison/export.py` renders the cached report as CSV or a standalone
   dark-themed HTML table.
 
+## Dashboard (Step 4)
+
+- `src/useSim.ts` — single `useSim()` hook owns live `SimState`, the play/pause
+  loop (HTTP `step` on an interval, N steps/tick from a speed slider), and the
+  `reset / step / run` controls. All views read from it.
+- `src/ControlSidebar.tsx` — persistent left panel: transport, speed, scheduler,
+  environment + receiver config fields, scenario presets, `apply & reset`.
+- `src/charts.tsx` — dependency-free responsive charts: `SpectrumChart` (SVG
+  bars), `Waterfall` (canvas heatmap + scan-path overlay), `LineChart`
+  (multi-series, HTML y-axis labels + `vectorEffect="non-scaling-stroke"` so a
+  stretched viewBox keeps crisp text and 1px lines), `BarChart`, `Sparkline`.
+- `src/views/*` — one file per tab. Live Monitor is the `[center | right] /
+  [log | reward]` grid; the others are full-width.
+- Backend additions: `GET /api/explainability/log` (decision log from
+  `sim.history`), `GET /api/training/{runs,last}` (manager keeps the last 25
+  `TrainingReport`s), `GET /api/report/run[/export/{fmt}]`,
+  `GET /api/dataset/{id}/preview` (block-reduced occupancy/power grid for the
+  Dataset Lab thumbnail).
+
 ## Roadmap
 
-- **Step 4** — full tabbed dashboard (Live Monitor, Strategy Comparison, Dataset Lab, Training Runs, Explainability Log, Reports).
-- **Step 5** — scenario presets, metric hardening, expanded tests, judge-ready README + demo script.
+- **Step 5** — scenario presets in config, metric-denominator hardening,
+  expanded tests, judge-ready README + demo script, final safety pass.

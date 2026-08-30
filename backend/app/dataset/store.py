@@ -128,6 +128,40 @@ class DatasetStore:
     def config_for(self, dataset_id: str) -> RFEnvironmentConfig:
         return self.get(dataset_id).config
 
+    def preview(
+        self, dataset_id: str, max_rows: int = 140, max_cols: int = 96
+    ) -> dict:
+        """Down-sampled occupancy + mean-power grid for a heatmap thumbnail."""
+        arrays = self.load_arrays(dataset_id)
+        occ = arrays["occupancy"].astype(np.float32)
+        power = arrays["power_db"].astype(np.float32)
+        T, B = occ.shape
+        rstep = max(1, -(-T // max_rows))  # ceil division -> never exceeds max_rows
+        cstep = max(1, -(-B // max_cols))
+
+        def _block_reduce(mat: np.ndarray, how: str) -> list[list[float]]:
+            rows: list[list[float]] = []
+            for r0 in range(0, T, rstep):
+                row: list[float] = []
+                block_r = mat[r0 : r0 + rstep]
+                for c0 in range(0, B, cstep):
+                    block = block_r[:, c0 : c0 + cstep]
+                    row.append(
+                        float(block.max() if how == "max" else block.mean())
+                    )
+                rows.append([round(v, 3) for v in row])
+            return rows
+
+        return {
+            "dataset_id": dataset_id,
+            "time_slots": T,
+            "bands": B,
+            "row_step": rstep,
+            "col_step": cstep,
+            "occupancy": _block_reduce(occ, "max"),
+            "power_db": _block_reduce(power, "mean"),
+        }
+
 
 _STORE: DatasetStore | None = None
 _STORE_LOCK = threading.Lock()

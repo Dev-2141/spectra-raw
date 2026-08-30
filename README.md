@@ -13,7 +13,7 @@ from hits, misses, false alarms, and reward.
 
 ---
 
-## Status — Steps 1–3 of 5 complete
+## Status — Steps 1–4 of 5 complete
 
 | Area | Delivered |
 | --- | --- |
@@ -26,11 +26,11 @@ from hits, misses, false alarms, and reward.
 | Metrics | Pd, false-alarm rate, interception ratio, intercept delay, reward, coverage, revisit, missed opportunities, high-priority rate, correct-prediction % |
 | Dataset lab | DeepSense-style generator (occupancy / power / SNR / threat / emitter-type-label matrices), NPY+CSV+JSON store, replay as simulation environment |
 | Strategy comparison | run all schedulers on one shared scenario (seed or replayed dataset), weighted-score winner, time series, JSON/CSV/HTML export |
-| API | `health`, `state`, `schedulers`, `simulation/{reset,step,run,train}`, `dataset/{generate,list,{id},{id}/stats,{id}/load}`, `comparison/{run,last,export/{fmt}}` |
-| Frontend | Dark dashboard: control panel, scheduler picker + run/train, Active Decision panel, Dataset Lab, Strategy Comparison table with export links |
-| Tests | 53 `pytest` tests (Steps 1–3) |
+| API | `health`, `state`, `schedulers`, `simulation/{reset,step,run,train}`, `dataset/{generate,list,{id},{id}/stats,{id}/preview,{id}/load}`, `comparison/{run,last,export/{fmt}}`, `explainability/log`, `training/{runs,last}`, `report/run[/export/{fmt}]` |
+| Frontend | Full tabbed dashboard — persistent control sidebar (transport, speed, scheduler, env/receiver config, presets) + six views: **Live Monitor** (spectrum, waterfall + scan-path overlay, live metric cards, active-decision panel, event log, reward timeline), **Strategy Comparison** (ranked table, bar + line charts, winner badge, exports), **Dataset Lab** (generate form, list, stat cards, preview heatmap, load), **Training Runs** (train form, per-episode chart + table), **Explainability Log** (filterable live decision log), **Reports** (run report + last comparison, CSV/JSON/HTML export). Hand-built responsive SVG/canvas charts, no chart dependency. |
+| Tests | 59 `pytest` tests (Steps 1–4) |
 
-The full tabbed dashboard (Step 4) and polish/presets/docs (Step 5) are next.
+Polish, scenario presets, metric hardening, judge-ready docs + demo script (Step 5) are next.
 
 ---
 
