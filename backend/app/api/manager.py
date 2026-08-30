@@ -10,7 +10,15 @@ import threading
 
 import numpy as np
 
+from ..comparison.engine import compare_strategies
+from ..dataset.generator import build_dataset
+from ..dataset.store import get_store
 from ..models.core import (
+    ComparisonReport,
+    ComparisonRequest,
+    DatasetGenerateRequest,
+    DatasetLoadRequest,
+    DatasetMeta,
     EpisodeResult,
     RFEnvironmentConfig,
     ReceiverConfig,
@@ -33,6 +41,8 @@ class SimulationManager:
         self._scheduler_params: dict = {}
         self._env_config = RFEnvironmentConfig()
         self._receiver_config = ReceiverConfig()
+        self._dataset_id: str | None = None
+        self._last_comparison: ComparisonReport | None = None
         self.reset(ResetRequest())
 
     # ------------------------------------------------------------------ #
@@ -46,7 +56,52 @@ class SimulationManager:
     def reset(self, req: ResetRequest) -> dict:
         with self._lock:
             if req.environment is not None:
+                # Explicit env config exits dataset-replay mode.
                 self._env_config = req.environment
+                self._dataset_id = None
+            if req.receiver is not None:
+                self._receiver_config = req.receiver
+            self._scheduler_name = req.scheduler or self._scheduler_name
+            self._scheduler_params = req.scheduler_params or {}
+
+            env_instance = None
+            if self._dataset_id is not None:
+                env_instance = get_store().build_replay_env(self._dataset_id)
+
+            self._sim = Simulation(
+                env_config=self._env_config,
+                receiver_config=self._receiver_config,
+                scheduler_name=self._scheduler_name,
+                scheduler_params=self._scheduler_params,
+                env_instance=env_instance,
+            )
+            return self.state()
+
+    # ------------------------------------------------------------------ #
+    # Dataset lab
+    # ------------------------------------------------------------------ #
+    def generate_dataset(self, req: DatasetGenerateRequest) -> dict:
+        with self._lock:
+            cfg = req.config or self._env_config
+            meta, arrays = build_dataset(cfg, name=req.name)
+            meta = get_store().save(meta, arrays)
+            return meta.model_dump()
+
+    def list_datasets(self) -> list[dict]:
+        return [m.model_dump() for m in get_store().list()]
+
+    def get_dataset(self, dataset_id: str) -> dict:
+        return get_store().get(dataset_id).model_dump()
+
+    def dataset_stats(self, dataset_id: str) -> dict:
+        return get_store().get(dataset_id).stats.model_dump()
+
+    def load_dataset(self, dataset_id: str, req: DatasetLoadRequest) -> dict:
+        with self._lock:
+            store = get_store()
+            store.get(dataset_id)  # raises KeyError if missing
+            self._dataset_id = dataset_id
+            self._env_config = store.config_for(dataset_id)
             if req.receiver is not None:
                 self._receiver_config = req.receiver
             self._scheduler_name = req.scheduler or self._scheduler_name
@@ -57,8 +112,48 @@ class SimulationManager:
                 receiver_config=self._receiver_config,
                 scheduler_name=self._scheduler_name,
                 scheduler_params=self._scheduler_params,
+                env_instance=store.build_replay_env(dataset_id),
             )
-            return self.state()
+            state = self.state()
+            state["loaded_dataset"] = dataset_id
+            return state
+
+    # ------------------------------------------------------------------ #
+    # Strategy comparison
+    # ------------------------------------------------------------------ #
+    def run_comparison(self, req: ComparisonRequest) -> dict:
+        with self._lock:
+            unknown = [s for s in req.schedulers if s not in list_schedulers()]
+            if unknown:
+                raise KeyError(f"unknown scheduler(s): {', '.join(unknown)}")
+
+            env_factory = None
+            replayed = None
+            if self._dataset_id is not None:
+                ds_id = self._dataset_id
+                replayed = ds_id
+                env_factory = lambda: get_store().build_replay_env(ds_id)  # noqa: E731
+                env_config = get_store().config_for(ds_id)
+            else:
+                env_config = self._env_config
+                if req.seed is not None:
+                    env_config = env_config.model_copy(update={"seed": req.seed})
+
+            report = compare_strategies(
+                env_config=env_config,
+                receiver_config=self._receiver_config,
+                schedulers=req.schedulers,
+                steps=req.steps,
+                series_points=req.series_points,
+                scheduler_params=req.scheduler_params,
+                env_factory=env_factory,
+                replayed_dataset=replayed,
+            )
+            self._last_comparison = report
+            return report.model_dump()
+
+    def last_comparison(self) -> ComparisonReport | None:
+        return self._last_comparison
 
     def step(self, count: int = 1) -> dict:
         with self._lock:
@@ -72,10 +167,9 @@ class SimulationManager:
     def run(self, steps: int, scheduler: str | None, params: dict, reset: bool) -> dict:
         with self._lock:
             if reset:
+                # Pass no environment so replay-mode (loaded dataset) is preserved.
                 self.reset(
                     ResetRequest(
-                        environment=self._env_config,
-                        receiver=self._receiver_config,
                         scheduler=scheduler or self._scheduler_name,
                         scheduler_params=params or self._scheduler_params,
                     )
@@ -197,6 +291,8 @@ class SimulationManager:
                 "max_slots": env.num_time_slots,
                 "scheduler": sim.scheduler_name,
                 "available_schedulers": list_schedulers(),
+                "dataset_id": self._dataset_id,
+                "replay_mode": bool(getattr(env, "replayed", False)),
                 "environment": {
                     "num_bands": env.num_bands,
                     "num_time_slots": env.num_time_slots,

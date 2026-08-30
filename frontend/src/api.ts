@@ -49,6 +49,8 @@ export interface SimState {
   max_slots: number;
   scheduler: string;
   available_schedulers: string[];
+  dataset_id: string | null;
+  replay_mode: boolean;
   environment: {
     num_bands: number;
     num_time_slots: number;
@@ -137,6 +139,56 @@ export interface TrainingReport {
   best_episode: number;
 }
 
+export interface DatasetMeta {
+  dataset_id: string;
+  created_at: string;
+  name: string;
+  number_of_bands: number;
+  number_of_time_slots: number;
+  stats: {
+    occupancy_percentage: number;
+    active_band_count: number;
+    active_time_count: number;
+    emitter_type_distribution: Record<string, number>;
+    average_snr_db: number;
+    threat_distribution: Record<string, number>;
+    sparsity_score: number;
+  };
+}
+
+export interface ComparisonReport {
+  scenario_seed: number;
+  replayed_dataset: string | null;
+  number_of_bands: number;
+  steps: number;
+  winner: string;
+  ranking: string[];
+  score_weights: Record<string, number>;
+  metrics_table: Array<{
+    scheduler: string;
+    rank: number;
+    weighted_score: number;
+    probability_of_detection: number;
+    false_alarm_rate: number;
+    interception_ratio: number;
+    average_intercept_delay: number;
+    average_reward: number;
+    high_priority_detection_rate: number;
+    missed_opportunity_count: number;
+    scan_coverage: number;
+  }>;
+  entries: Array<{
+    scheduler: string;
+    series: {
+      time_slot: number[];
+      average_reward: number[];
+      detection_rate: number[];
+      interception_ratio: number[];
+      scan_coverage: number[];
+    };
+  }>;
+}
+
 export const api = {
   health: () => jget<Health>("/api/health"),
   state: () => jget<SimState>("/api/state"),
@@ -153,4 +205,13 @@ export const api = {
       steps_per_episode,
       vary_seed: true,
     }),
+  datasetGenerate: (name?: string) =>
+    jpost<DatasetMeta>("/api/dataset/generate", name ? { name } : {}),
+  datasetList: () => jget<{ datasets: DatasetMeta[] }>("/api/dataset/list"),
+  datasetLoad: (id: string, scheduler?: string) =>
+    jpost<SimState>(`/api/dataset/${id}/load`, { scheduler }),
+  comparisonRun: (schedulers: string[], steps = 1000, seed?: number) =>
+    jpost<ComparisonReport>("/api/comparison/run", { schedulers, steps, seed }),
+  comparisonExportUrl: (fmt: "json" | "csv" | "html") =>
+    `/api/comparison/export/${fmt}`,
 };

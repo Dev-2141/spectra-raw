@@ -6,6 +6,7 @@ __pycache__/
 backend/data/*.npy
 backend/data/*.csv
 backend/data/*.json
+backend/data/datasets/
 !backend/data/.gitkeep
 
 # Node / frontend

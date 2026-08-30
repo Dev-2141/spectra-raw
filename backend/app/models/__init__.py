@@ -18,6 +18,14 @@ from .core import (
     TrainRequest,
     EpisodeResult,
     TrainingReport,
+    DatasetStats,
+    DatasetMeta,
+    DatasetGenerateRequest,
+    DatasetLoadRequest,
+    ComparisonRequest,
+    ComparisonSeries,
+    ComparisonEntry,
+    ComparisonReport,
 )
 
 __all__ = [
@@ -38,4 +46,12 @@ __all__ = [
     "TrainRequest",
     "EpisodeResult",
     "TrainingReport",
+    "DatasetStats",
+    "DatasetMeta",
+    "DatasetGenerateRequest",
+    "DatasetLoadRequest",
+    "ComparisonRequest",
+    "ComparisonSeries",
+    "ComparisonEntry",
+    "ComparisonReport",
 ]

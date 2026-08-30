@@ -50,9 +50,10 @@ _BEHAVIOR_WEIGHTS = {
 class RFEnvironment:
     """Owns the synthetic ground truth for one scenario."""
 
-    def __init__(self, config: RFEnvironmentConfig):
+    def __init__(self, config: RFEnvironmentConfig, prebuilt: dict | None = None):
         self.config = config
         self.rng = np.random.default_rng(config.seed)
+        self.replayed = prebuilt is not None
 
         self.num_bands = config.num_bands
         self.num_time_slots = config.num_time_slots
@@ -82,7 +83,34 @@ class RFEnvironment:
         )
         self.events: list[EmitterEvent] = []
 
-        self._generate()
+        if prebuilt is not None:
+            self._load_prebuilt(prebuilt)
+        else:
+            self._generate()
+
+    # ------------------------------------------------------------------ #
+    def _load_prebuilt(self, pb: dict) -> None:
+        """Rehydrate ground truth from saved dataset arrays (replay mode)."""
+        self.emitters = [
+            e if isinstance(e, Emitter) else Emitter(**e) for e in pb["emitters"]
+        ]
+        self.occupancy = np.asarray(pb["occupancy"], dtype=bool)
+        self.snr_db = np.asarray(pb["snr_db"], dtype=np.float32)
+        self.power_db = np.asarray(pb["power_db"], dtype=np.float32)
+        self.threat = np.asarray(pb["threat"], dtype=np.float32)
+        self.emitter_id_matrix = np.asarray(
+            pb.get(
+                "emitter_id_matrix",
+                np.full(self.occupancy.shape, -1, dtype=np.int32),
+            ),
+            dtype=np.int32,
+        )
+        if self.occupancy.shape != (self.num_time_slots, self.num_bands):
+            raise ValueError(
+                f"dataset shape {self.occupancy.shape} != config "
+                f"({self.num_time_slots}, {self.num_bands})"
+            )
+        self._extract_events()
 
     # ------------------------------------------------------------------ #
     # Generation

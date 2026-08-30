@@ -69,6 +69,7 @@ class Simulation:
         scheduler_name: str,
         scheduler_params: dict | None = None,
         scheduler_instance: BaseScheduler | None = None,
+        env_instance: RFEnvironment | None = None,
     ):
         self.env_config = env_config
         self.receiver_config = receiver_config
@@ -77,7 +78,8 @@ class Simulation:
 
         # Independent RNG streams so scheduler noise doesn't perturb the world.
         self._seed = env_config.seed
-        self.env = RFEnvironment(env_config)
+        # A supplied env replays a saved dataset instead of generating a new one.
+        self.env = env_instance or RFEnvironment(env_config)
         self.receiver = Receiver(
             receiver_config, np.random.default_rng(self._seed + 101)
         )

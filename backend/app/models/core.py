@@ -254,3 +254,105 @@ class TrainingReport(BaseModel):
     last_episode_avg_reward: float
     reward_improvement: float
     best_episode: int
+
+
+# --------------------------------------------------------------------------- #
+# Dataset lab (Step 3)
+# --------------------------------------------------------------------------- #
+class DatasetStats(BaseModel):
+    """Summary statistics for a generated dataset."""
+
+    occupancy_percentage: float
+    active_band_count: int
+    active_time_count: int
+    emitter_type_distribution: dict[str, int]
+    average_snr_db: float
+    threat_distribution: dict[str, int]
+    sparsity_score: float
+
+
+class DatasetMeta(BaseModel):
+    """DeepSense-style synthetic dataset descriptor (JSON metadata sidecar)."""
+
+    dataset_id: str
+    created_at: str
+    name: str
+    number_of_bands: int
+    number_of_time_slots: int
+    config: RFEnvironmentConfig
+    emitters: list[Emitter]
+    stats: DatasetStats
+    files: dict[str, str]
+    labels: dict[str, int] = Field(
+        default_factory=dict,
+        description="Emitter-behavior label -> integer code used in labels matrix.",
+    )
+
+
+class DatasetGenerateRequest(BaseModel):
+    """Body for POST /api/dataset/generate."""
+
+    name: Optional[str] = None
+    config: Optional[RFEnvironmentConfig] = None
+
+
+class DatasetLoadRequest(BaseModel):
+    """Body for POST /api/dataset/{id}/load."""
+
+    receiver: Optional[ReceiverConfig] = None
+    scheduler: str = "round_robin"
+    scheduler_params: dict = Field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# Strategy comparison (Step 3)
+# --------------------------------------------------------------------------- #
+class ComparisonRequest(BaseModel):
+    """Body for POST /api/comparison/run."""
+
+    schedulers: list[str] = Field(
+        default_factory=lambda: [
+            "round_robin",
+            "random",
+            "priority",
+            "epsilon_bandit",
+            "ucb_bandit",
+            "q_learning",
+        ]
+    )
+    steps: int = Field(1000, ge=10, le=20000)
+    seed: Optional[int] = Field(None, description="Override the shared scenario seed.")
+    scheduler_params: dict[str, dict] = Field(default_factory=dict)
+    series_points: int = Field(60, ge=5, le=400)
+
+
+class ComparisonSeries(BaseModel):
+    time_slot: list[int]
+    average_reward: list[float]
+    detection_rate: list[float]
+    interception_ratio: list[float]
+    scan_coverage: list[float]
+
+
+class ComparisonEntry(BaseModel):
+    scheduler: str
+    metrics: SchedulerMetrics
+    series: ComparisonSeries
+    weighted_score: float
+    rank: int
+
+
+class ComparisonReport(BaseModel):
+    """Body returned by POST /api/comparison/run."""
+
+    scenario_seed: int
+    replayed_dataset: Optional[str] = None
+    number_of_bands: int
+    number_of_time_slots: int
+    steps: int
+    schedulers: list[str]
+    entries: list[ComparisonEntry]
+    metrics_table: list[dict]
+    winner: str
+    ranking: list[str]
+    score_weights: dict[str, float]

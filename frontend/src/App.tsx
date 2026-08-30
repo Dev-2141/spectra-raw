@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type Health, type SimState } from "./api";
+import {
+  api,
+  type ComparisonReport,
+  type DatasetMeta,
+  type Health,
+  type SimState,
+} from "./api";
 
 type Conn = "connecting" | "online" | "offline";
 
@@ -25,6 +31,8 @@ export default function App() {
   const [scheduler, setScheduler] = useState<string>("round_robin");
   const [learners, setLearners] = useState<string[]>([]);
   const [training, setTraining] = useState<string | null>(null);
+  const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
+  const [comparison, setComparison] = useState<ComparisonReport | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -44,6 +52,45 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
+
+  const loadDatasets = useCallback(async () => {
+    try {
+      setDatasets((await api.datasetList()).datasets);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDatasets();
+  }, [loadDatasets]);
+
+  const runWrapped = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const generateDataset = () =>
+    runWrapped(async () => {
+      await api.datasetGenerate();
+      await loadDatasets();
+    });
+
+  const loadDataset = (id: string) =>
+    runWrapped(async () => setState(await api.datasetLoad(id, scheduler)));
+
+  const runComparison = () =>
+    runWrapped(async () => {
+      const set = ["round_robin", "random", "priority", "epsilon_bandit", "ucb_bandit", "q_learning"];
+      setComparison(await api.comparisonRun(set, 1000));
+    });
 
   const trainSelected = async () => {
     setBusy(true);
@@ -204,6 +251,98 @@ export default function App() {
           <Panel title="Receiver scan path (last decisions)">
             <ScanPath state={state} />
           </Panel>
+
+          <Panel title="Dataset Lab (DeepSense-style synthetic datasets)">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Btn disabled={busy} onClick={generateDataset}>
+                Generate from current config
+              </Btn>
+              <span className="text-[10px] text-rf-dim">
+                {state?.replay_mode
+                  ? `replaying ${state.dataset_id}`
+                  : "live generator"}
+              </span>
+            </div>
+            {datasets.length === 0 ? (
+              <Empty>no datasets yet</Empty>
+            ) : (
+              <table className="w-full text-[11px]">
+                <thead className="text-rf-dim">
+                  <tr>
+                    <th className="text-left font-normal">id</th>
+                    <th className="text-right font-normal">bands×slots</th>
+                    <th className="text-right font-normal">occ%</th>
+                    <th className="text-right font-normal">avg SNR</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody className="tabular-nums">
+                  {datasets.slice(0, 8).map((d) => (
+                    <tr key={d.dataset_id} className="border-t border-rf-grid">
+                      <td className="text-rf-text">{d.dataset_id}</td>
+                      <td className="text-right">
+                        {d.number_of_bands}×{d.number_of_time_slots}
+                      </td>
+                      <td className="text-right">
+                        {(d.stats.occupancy_percentage * 100).toFixed(1)}
+                      </td>
+                      <td className="text-right">{d.stats.average_snr_db.toFixed(1)}</td>
+                      <td className="text-right">
+                        <button
+                          disabled={busy}
+                          onClick={() => loadDataset(d.dataset_id)}
+                          className="text-rf-scan hover:text-rf-accent disabled:opacity-40"
+                        >
+                          load
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Panel>
+
+          <Panel title="Strategy Comparison (same scenario, all schedulers)">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Btn disabled={busy} onClick={runComparison}>
+                Run comparison ×1000
+              </Btn>
+              {comparison && (
+                <>
+                  <span className="text-[11px]">
+                    winner:&nbsp;
+                    <span className="font-bold text-rf-accent">{comparison.winner}</span>
+                  </span>
+                  <a
+                    href={api.comparisonExportUrl("csv")}
+                    className="text-[10px] text-rf-scan hover:text-rf-accent"
+                  >
+                    ↓ csv
+                  </a>
+                  <a
+                    href={api.comparisonExportUrl("json")}
+                    className="text-[10px] text-rf-scan hover:text-rf-accent"
+                  >
+                    ↓ json
+                  </a>
+                  <a
+                    href={api.comparisonExportUrl("html")}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[10px] text-rf-scan hover:text-rf-accent"
+                  >
+                    ↗ html
+                  </a>
+                </>
+              )}
+            </div>
+            {comparison ? (
+              <ComparisonTable report={comparison} />
+            ) : (
+              <Empty>run a comparison to rank strategies</Empty>
+            )}
+          </Panel>
         </main>
 
         {/* Right: metrics placeholder */}
@@ -320,6 +459,59 @@ function KV({ k, v }: { k: string; v?: string | number }) {
 
 function Empty({ children }: { children: ReactNode }) {
   return <div className="py-4 text-center text-[11px] text-rf-dim">{children}</div>;
+}
+
+function ComparisonTable({ report }: { report: ComparisonReport }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[520px] text-[11px]">
+        <thead className="text-rf-dim">
+          <tr>
+            <th className="text-left font-normal">#</th>
+            <th className="text-left font-normal">scheduler</th>
+            <th className="text-right font-normal">score</th>
+            <th className="text-right font-normal">P(det)</th>
+            <th className="text-right font-normal">intercept</th>
+            <th className="text-right font-normal">hi-pri</th>
+            <th className="text-right font-normal">delay</th>
+            <th className="text-right font-normal">avg R</th>
+            <th className="text-right font-normal">missed</th>
+            <th className="text-right font-normal">cov</th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums">
+          {report.metrics_table.map((r) => (
+            <tr
+              key={r.scheduler}
+              className={
+                "border-t border-rf-grid " +
+                (r.scheduler === report.winner ? "text-rf-accent" : "")
+              }
+            >
+              <td>{r.rank}</td>
+              <td>{r.scheduler}</td>
+              <td className="text-right">{r.weighted_score.toFixed(3)}</td>
+              <td className="text-right">{r.probability_of_detection.toFixed(3)}</td>
+              <td className="text-right">{r.interception_ratio.toFixed(3)}</td>
+              <td className="text-right">{r.high_priority_detection_rate.toFixed(3)}</td>
+              <td className="text-right">{r.average_intercept_delay.toFixed(1)}</td>
+              <td className="text-right">{r.average_reward.toFixed(2)}</td>
+              <td className="text-right">{r.missed_opportunity_count}</td>
+              <td className="text-right">{r.scan_coverage.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-1 text-[10px] text-rf-dim">
+        seed {report.scenario_seed}
+        {report.replayed_dataset ? ` · replay ${report.replayed_dataset}` : ""} ·{" "}
+        {report.steps} steps · weighted score:{" "}
+        {Object.entries(report.score_weights)
+          .map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`)
+          .join(", ")}
+      </p>
+    </div>
+  );
 }
 
 function DecisionCard({ step }: { step: NonNullable<SimState["last_step"]> }) {

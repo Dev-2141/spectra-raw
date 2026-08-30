@@ -54,10 +54,33 @@ t += dwell_slots
 - **Correct prediction %** = correct activity predictions / predictions made
   (baselines make no prediction, so this stays 0 until Step 2)
 
+## Dataset lab & replay (Step 3)
+
+- `app/dataset/generator.py` wraps the same seeded `RFEnvironment` and extracts
+  `occupancy / power_db / snr_db / threat / labels / emitter_id` matrices plus a
+  `DatasetMeta` sidecar (stats, emitter list, integer label codes).
+- `app/dataset/store.py` persists each dataset to
+  `backend/data/datasets/<id>/` — `meta.json` + `*.npy` (canonical) + `*.csv`
+  mirrors — and rehydrates it via `RFEnvironment(config, prebuilt=...)`
+  (`env.replayed == True`), a drop-in for the live generator.
+- The `SimulationManager` tracks a `_dataset_id`; while set, every `reset` /
+  `run` rebuilds the replay env so the loaded dataset stays active until an
+  explicit `environment` config is posted.
+
+## Strategy comparison (Step 3)
+
+- `app/comparison/engine.py` runs each requested scheduler in its own
+  `Simulation` seeded identically (or from the same replayed dataset), so the
+  ground truth is byte-identical across strategies.
+- Per-step `SchedulerMetrics` snapshots (already in `sim.history`) are
+  down-sampled into reward / detection-rate / interception / coverage series.
+- Winner = weighted score over min-max-normalised metrics:
+  `0.35·interception + 0.25·hi-priority + 0.20·avg-reward +
+  0.10·(1−missed) + 0.10·(1−delay)`.
+- `app/comparison/export.py` renders the cached report as CSV or a standalone
+  dark-themed HTML table.
+
 ## Roadmap
 
-- **Step 2** — priority score, ε-greedy bandit, UCB1, Thompson, Q-learning; reward
-  shaping; explainability payloads.
-- **Step 3** — DeepSense-style dataset generator + replay; strategy comparison engine; report export.
-- **Step 4** — full dashboard (Live Monitor, Strategy Comparison, Dataset Lab, Training Runs, Explainability Log, Reports).
+- **Step 4** — full tabbed dashboard (Live Monitor, Strategy Comparison, Dataset Lab, Training Runs, Explainability Log, Reports).
 - **Step 5** — scenario presets, metric hardening, expanded tests, judge-ready README + demo script.

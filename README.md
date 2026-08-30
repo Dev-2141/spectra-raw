@@ -13,21 +13,24 @@ from hits, misses, false alarms, and reward.
 
 ---
 
-## Status — Step 1 of 5 complete
+## Status — Steps 1–3 of 5 complete
 
-| Area | Delivered in Step 1 |
+| Area | Delivered |
 | --- | --- |
 | Project scaffold | `backend/` (FastAPI) + `frontend/` (React+Vite+TS) + `docs/` |
 | Simulation core | Synthetic RF environment, receiver digital twin, reward engine, step engine |
 | Emitter behaviors | `constant`, `burst`, `periodic`, `hopping`, `low_duty`, `priority` |
-| Schedulers | `round_robin`, `random` (baselines) |
+| Baseline schedulers | `round_robin`, `random` |
+| Smart schedulers | `priority` (weighted score), `epsilon_bandit`, `ucb_bandit`, `thompson`, `q_learning` (tabular, multi-episode training) |
+| Explainability | every decision returns confidence, top-3 reasons, alternatives, prediction, and a plain-English explanation |
 | Metrics | Pd, false-alarm rate, interception ratio, intercept delay, reward, coverage, revisit, missed opportunities, high-priority rate, correct-prediction % |
-| API | `/api/health`, `/api/state`, `/api/simulation/reset|step|run`, `/api/schedulers` |
-| Frontend | Dark dashboard shell: header, control panel, spectrum/waterfall/scan-path previews, metrics panel, status bar |
-| Tests | 12 `pytest` tests (environment shape, activity, determinism, step/time, round-robin cycle, metrics, all API endpoints) |
+| Dataset lab | DeepSense-style generator (occupancy / power / SNR / threat / emitter-type-label matrices), NPY+CSV+JSON store, replay as simulation environment |
+| Strategy comparison | run all schedulers on one shared scenario (seed or replayed dataset), weighted-score winner, time series, JSON/CSV/HTML export |
+| API | `health`, `state`, `schedulers`, `simulation/{reset,step,run,train}`, `dataset/{generate,list,{id},{id}/stats,{id}/load}`, `comparison/{run,last,export/{fmt}}` |
+| Frontend | Dark dashboard: control panel, scheduler picker + run/train, Active Decision panel, Dataset Lab, Strategy Comparison table with export links |
+| Tests | 53 `pytest` tests (Steps 1–3) |
 
-Smart schedulers, dataset lab, strategy comparison, and the full dashboard arrive
-in Steps 2–5.
+The full tabbed dashboard (Step 4) and polish/presets/docs (Step 5) are next.
 
 ---
 
@@ -96,7 +99,33 @@ cd backend
 ```
 
 Open-loop baselines (round-robin, random) accrue large missed-opportunity
-penalties — that gap is what the smart schedulers in Step 2 will close.
+penalties — the adaptive schedulers (`priority`, bandits, `q_learning`) close
+that gap by revisiting active/high-threat bands sooner.
+
+## Datasets & strategy comparison (Step 3)
+
+```bash
+# generate a reusable synthetic dataset from the current config
+curl -X POST http://127.0.0.1:8000/api/dataset/generate \
+  -H "Content-Type: application/json" \
+  -d '{"name":"sparse-demo","config":{"num_bands":64,"num_time_slots":1000,"seed":2025}}'
+
+curl http://127.0.0.1:8000/api/dataset/list
+curl -X POST http://127.0.0.1:8000/api/dataset/<id>/load          # replay it as the live env
+
+# run every scheduler against one shared scenario and rank them
+curl -X POST http://127.0.0.1:8000/api/comparison/run \
+  -H "Content-Type: application/json" \
+  -d '{"schedulers":["round_robin","random","priority","epsilon_bandit","ucb_bandit","q_learning"],"steps":1000}'
+
+curl http://127.0.0.1:8000/api/comparison/export/csv    # or /json, /html
+```
+
+Datasets are stored under `backend/data/datasets/<id>/` as `meta.json` +
+`*.npy` (source of truth) + `*.csv` mirrors. The comparison winner is chosen by
+a weighted score over interception ratio, high-priority detection rate, average
+reward, and (inverted) missed opportunities and intercept delay — no metric is
+hardcoded per strategy.
 
 ---
 
