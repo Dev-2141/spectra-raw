@@ -27,6 +27,13 @@ improve from hits, misses, false alarms, and reward — entirely on synthetic RF
 
 ---
 
+> **Deep dive:** [`docs/REFERENCE.md`](docs/REFERENCE.md) documents every module,
+> class, and function in the codebase and the theory behind each feature
+> (POMDP framing, detection theory, multi-armed bandits, Q-learning, priority
+> scoring, the metrics, and the comparison scoring). [`docs/DEMO.md`](docs/DEMO.md)
+> is the judge demo script; [`docs/architecture.md`](docs/architecture.md) is the
+> data-flow summary.
+
 ## 1. Project overview
 
 The full product is two services:
