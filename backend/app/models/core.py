@@ -73,6 +73,13 @@ class RFEnvironmentConfig(BaseModel):
             "get weight 0. Falls back to the built-in mix when omitted."
         ),
     )
+    emitter_specs: Optional[list["EmitterSpec"]] = Field(
+        None,
+        description=(
+            "Explicit parametric emitters (scenario editor). When present the "
+            "generator paints these instead of sampling a random behaviour mix."
+        ),
+    )
     seed: int = Field(1234, description="Master RNG seed for reproducibility.")
 
 
@@ -370,3 +377,412 @@ class ComparisonReport(BaseModel):
     winner: str
     ranking: list[str]
     score_weights: dict[str, float]
+
+
+# --------------------------------------------------------------------------- #
+# Hardware / live receive-only path (Extension Step 2)
+#
+# RECEIVE-ONLY. None of these models carry a transmit parameter. A "sweep" is a
+# power-vs-frequency snapshot from an SDR (or a recorded file replayed as one).
+# --------------------------------------------------------------------------- #
+class SourceMode(str, Enum):
+    SIMULATION = "simulation"
+    FILE_REPLAY = "file_replay"
+    RTL_POWER = "rtl_power"
+    HACKRF_SWEEP = "hackrf_sweep"
+    SOAPYSDR = "soapysdr"
+
+
+class HardwareConfig(BaseModel):
+    """Receive-only sweep configuration for the live path."""
+
+    source_mode: SourceMode = SourceMode.FILE_REPLAY
+    start_freq_hz: float = Field(88_000_000.0, gt=0)
+    stop_freq_hz: float = Field(108_000_000.0, gt=0)
+    bin_hz: float = Field(100_000.0, gt=0)
+    sweep_interval_ms: int = Field(250, ge=10, le=10_000)
+    gain_db: Optional[float] = Field(None, description="RX gain, adapter-dependent.")
+    ppm: Optional[int] = Field(None, description="Frequency correction, ppm.")
+    num_bands: int = Field(64, ge=4, le=512, description="Occupancy band grid.")
+    recording_id: Optional[str] = Field(
+        None, description="Recording to play back when source_mode=file_replay."
+    )
+    replay_speed: float = Field(1.0, gt=0.0, le=200.0)
+    replay_loop: bool = True
+
+
+class SweepFrame(BaseModel):
+    """One power-vs-frequency snapshot (a full sweep)."""
+
+    ts: float = Field(..., description="Unix timestamp (seconds).")
+    seq: int = Field(..., description="Monotonic frame counter within a session.")
+    f_start_hz: float
+    f_stop_hz: float
+    bin_hz: float
+    power_dbm: list[float]
+    source: str
+
+
+class HardwareDevice(BaseModel):
+    id: str
+    label: str
+    driver: str
+    available: bool
+    receive_only: bool = True
+    note: str = ""
+
+
+class HardwareStatus(BaseModel):
+    source_mode: str
+    running: bool
+    available: bool
+    device_label: Optional[str] = None
+    frames_read: int = 0
+    last_frame_ts: Optional[float] = None
+    frame_rate_hz: float = 0.0
+    buffer_len: int = 0
+    latest_seq: int = -1
+    error: Optional[str] = None
+    recording: bool = False
+    recording_id: Optional[str] = None
+    hardware_mode: str = "receive_only"
+    transmit_capability: bool = False
+    detail: str = ""
+
+
+class BandObservation(BaseModel):
+    """DSP output for one band in one frame — what a scheduler consumes live."""
+
+    band: int
+    active: bool
+    power_dbm: float
+    noise_floor_dbm: float
+    snr_db: float
+    confidence: float
+
+
+class RecordingMeta(BaseModel):
+    recording_id: str
+    created_at: str
+    name: str
+    source: str
+    device_label: Optional[str] = None
+    start_freq_hz: float
+    stop_freq_hz: float
+    bin_hz: float
+    frame_count: int
+    duration_s: float
+    first_frame_ts: Optional[float] = None
+    last_frame_ts: Optional[float] = None
+
+
+class HardwareStartRequest(BaseModel):
+    """Optional inline config for POST /api/hardware/start."""
+
+    config: Optional[HardwareConfig] = None
+
+
+class RecordStartRequest(BaseModel):
+    name: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Parametric emitter model (Extension Step 3)
+# --------------------------------------------------------------------------- #
+class AntennaPattern(BaseModel):
+    """Synthetic antenna gain shape (affects observed SNR over time)."""
+
+    kind: str = Field("omni", description="omni | sector | rotating")
+    peak_gain_db: float = 0.0
+    # sector: main-beam within +/- beamwidth_deg of boresight_deg
+    boresight_deg: float = 0.0
+    beamwidth_deg: float = 90.0
+    backlobe_db: float = -20.0
+    # rotating: boresight sweeps 360 deg every rotation_period_slots
+    rotation_period_slots: int = 24
+
+
+class Kinematics(BaseModel):
+    """Emitter motion for propagation/Doppler (synthetic 2-D plane, km)."""
+
+    kind: str = Field("static", description="static | waypoint")
+    x_km: float = 0.0
+    y_km: float = 0.0
+    # waypoint: linear travel between (x_km,y_km) and (x2_km,y2_km) over the run
+    x2_km: float = 0.0
+    y2_km: float = 0.0
+    speed_kms: float = 0.0  # informational; travel is fitted to the timeline
+
+
+class EmitterSpec(BaseModel):
+    """A fully specified synthetic emitter for the scenario editor."""
+
+    id: int = 0
+    label: str = ""
+    home_band: int = 0
+    threat: float = Field(0.3, ge=0.0, le=1.0)
+    high_priority: bool = False
+    snr_db: float = 14.0
+    modulation: str = Field("none", description="am|fm|psk|fsk|chirp|noise|none label only")
+
+    # frequency agility
+    agility: str = Field("fixed", description="fixed | list_hop | random_hop | sweep")
+    hop_bands: list[int] = Field(default_factory=list)
+    hop_interval_slots: int = 6
+    sweep_span_bands: int = 8
+
+    # on/off model
+    duty: str = Field("blocks", description="blocks | periodic | bursts | low_duty")
+    period_slots: int = 20
+    pulse_slots: int = 2
+    phase_slots: int = 0
+
+    # PRI stagger model (radar-like); applies when duty == 'periodic'
+    pri_model: str = Field("fixed", description="fixed | jitter | stagger | dwell_switch")
+    pri_jitter_slots: int = 1
+    pri_stagger: list[int] = Field(default_factory=list)
+    pri_dwell_slots: int = 40
+
+    erp_db: float = 0.0
+    antenna: AntennaPattern = Field(default_factory=AntennaPattern)
+    kinematics: Kinematics = Field(default_factory=Kinematics)
+
+
+# --------------------------------------------------------------------------- #
+# Simulated EW effects (Extension Step 3) — SIMULATION ONLY, never RF
+# --------------------------------------------------------------------------- #
+class EWEffectSpec(BaseModel):
+    """An adversary-transmitter *effect on our observation* — synthetic only.
+
+    Effects change what the receiver sees (observed occupancy / SNR / power /
+    noise floor). They never alter ground truth and never touch a device.
+    """
+
+    kind: str = Field(
+        ...,
+        description="barrage_noise | spot_jam | swept_jam | repeater_ghost | spoof_track",
+    )
+    label: str = ""
+    start_slot: int = 0
+    stop_slot: int = 10_000
+    band_lo: int = 0
+    band_hi: int = 0
+    power_db: float = 20.0  # excess over noise floor injected into affected cells
+    # swept_jam
+    sweep_rate_bands_per_slot: float = 0.5
+    # repeater_ghost
+    source_band: int = 0
+    target_band: int = 0
+    delay_slots: int = 3
+    # spoof_track
+    spoof_period_slots: int = 18
+    spoof_pulse_slots: int = 2
+    spoof_snr_db: float = 12.0
+
+
+# --------------------------------------------------------------------------- #
+# Scenario (Extension Step 3)
+# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Direction finding / geolocation (Extension Step 5) — receive-only
+# --------------------------------------------------------------------------- #
+class ReceiverNode(BaseModel):
+    node_id: str = ""
+    name: str = ""
+    x_km: float = 0.0
+    y_km: float = 0.0
+    sync_source: str = "gpsdo"          # gpsdo | ptp | none
+    sync_quality: float = Field(0.95, ge=0.0, le=1.0)
+    timing_error_ns: float = 20.0       # 1-sigma; larger => bigger ellipse
+    bearing_error_deg: float = 3.0      # 1-sigma AOA error
+    last_seen_slot: int = -1
+    healthy: bool = True
+    kind: str = "sim"                   # sim | lan
+
+
+class GeoFix(BaseModel):
+    track_id: str
+    time_slot: int
+    est_x_km: float
+    est_y_km: float
+    true_x_km: Optional[float] = None   # sim only
+    true_y_km: Optional[float] = None
+    ellipse_a_km: float = 0.0           # semi-major (95%)
+    ellipse_b_km: float = 0.0           # semi-minor (95%)
+    ellipse_theta_deg: float = 0.0
+    cep_km: float = 0.0
+    error_km: Optional[float] = None    # |est - true|, sim only
+    n_nodes: int = 0
+    method: str = "tdoa+aoa"
+    solvable: bool = True
+
+
+class DFNodesRequest(BaseModel):
+    nodes: list[ReceiverNode] = Field(default_factory=list)
+
+
+class DFRegisterRequest(BaseModel):
+    key: str
+    node: ReceiverNode
+
+
+class Scenario(BaseModel):
+    """A portable, editable experiment: environment + emitters + effects + rx."""
+
+    scenario_id: str = ""
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    builtin: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+    environment: RFEnvironmentConfig
+    receiver: ReceiverConfig = Field(default_factory=ReceiverConfig)
+    effects: list[EWEffectSpec] = Field(default_factory=list)
+    df_nodes: list[ReceiverNode] = Field(default_factory=list)
+
+
+class ScenarioSaveRequest(BaseModel):
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    environment: RFEnvironmentConfig
+    receiver: ReceiverConfig = Field(default_factory=ReceiverConfig)
+    effects: list[EWEffectSpec] = Field(default_factory=list)
+    df_nodes: list[ReceiverNode] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Monte Carlo (Extension Step 3)
+# --------------------------------------------------------------------------- #
+class MonteCarloRequest(BaseModel):
+    scenario_id: Optional[str] = None
+    environment: Optional[RFEnvironmentConfig] = None
+    receiver: Optional[ReceiverConfig] = None
+    effects: list[EWEffectSpec] = Field(default_factory=list)
+    schedulers: list[str] = Field(
+        default_factory=lambda: ["round_robin", "random", "priority", "ucb_bandit"]
+    )
+    seeds: list[int] = Field(default_factory=list)
+    n_seeds: int = Field(12, ge=2, le=200)
+    base_seed: int = 20260901
+    steps: int = Field(800, ge=50, le=20000)
+
+
+class MetricAggregate(BaseModel):
+    metric: str
+    mean: float
+    std: float
+    ci95_low: float
+    ci95_high: float
+    n: int
+
+
+class MonteCarloEntry(BaseModel):
+    scheduler: str
+    aggregates: list[MetricAggregate]
+    win_rate: float  # fraction of seeds this scheduler had the best avg_reward
+
+
+class MonteCarloReport(BaseModel):
+    montecarlo_id: str
+    created_at: str
+    scenario_id: Optional[str] = None
+    scenario_name: str = ""
+    schedulers: list[str]
+    seeds: list[int]
+    steps: int
+    number_of_bands: int
+    entries: list[MonteCarloEntry]
+    ranking: list[str]
+    winner: str
+
+
+# --------------------------------------------------------------------------- #
+# Emitter/threat library (Extension Step 4) — synthetic only
+# --------------------------------------------------------------------------- #
+class EmitterLibraryEntry(BaseModel):
+    entry_id: str = ""
+    name: str
+    synthetic: bool = True  # always
+    freq_lo_mhz: float = 0.0
+    freq_hi_mhz: float = 0.0
+    home_band: int = 0
+    behavior: str = "periodic"  # constant|burst|periodic|hopping|low_duty|priority
+    modulation: str = "unknown"
+    pri_slots: float = 0.0
+    pri_jitter: float = 0.0
+    hop_span_bands: int = 0
+    duty_cycle: float = 0.0
+    threat: float = Field(0.3, ge=0.0, le=1.0)
+    notes: str = ""
+    revision: int = 1
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class LibraryEntrySaveRequest(BaseModel):
+    name: str
+    freq_lo_mhz: float = 0.0
+    freq_hi_mhz: float = 0.0
+    home_band: int = 0
+    behavior: str = "periodic"
+    modulation: str = "unknown"
+    pri_slots: float = 0.0
+    pri_jitter: float = 0.0
+    hop_span_bands: int = 0
+    duty_cycle: float = 0.0
+    threat: float = Field(0.3, ge=0.0, le=1.0)
+    notes: str = ""
+
+
+class LibraryRevision(BaseModel):
+    entry_id: str
+    revision: int
+    action: str  # create | update | delete
+    actor: str
+    ts: str
+    snapshot: dict
+
+
+# --------------------------------------------------------------------------- #
+# Tasking + alerting (Extension Step 4)
+# --------------------------------------------------------------------------- #
+class WatchList(BaseModel):
+    id: str = ""
+    name: str
+    band_lo: int = 0
+    band_hi: int = 0
+    weight: float = Field(1.5, ge=0.0, le=10.0)
+    enabled: bool = True
+
+
+class AlertRule(BaseModel):
+    id: str = ""
+    kind: str  # new_emitter|priority_hit|band_change|hop_detected|anomaly|library_match
+    enabled: bool = True
+    severity: str = "info"  # info | warn | critical
+    threshold: float = 0.6
+
+
+class Alert(BaseModel):
+    alert_id: str
+    ts: str
+    rule_kind: str
+    severity: str
+    track_id: Optional[str] = None
+    band: Optional[int] = None
+    detail: str = ""
+    state: str = "open"  # open | ack | closed
+
+
+class WatchListsRequest(BaseModel):
+    watch_lists: list[WatchList] = Field(default_factory=list)
+
+
+class AlertRulesRequest(BaseModel):
+    alert_rules: list[AlertRule] = Field(default_factory=list)
+
+
+# Resolve the forward reference RFEnvironmentConfig -> EmitterSpec (defined later).
+RFEnvironmentConfig.model_rebuild()

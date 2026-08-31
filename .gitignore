@@ -7,7 +7,14 @@ backend/data/*.npy
 backend/data/*.csv
 backend/data/*.json
 backend/data/datasets/
+backend/data/platform.db
+backend/data/audit/
+backend/data/recordings/
+backend/data/scenarios/
 !backend/data/.gitkeep
+
+# Trained-on-first-use classifier cache (not a source artifact)
+backend/app/analysis/models/*.joblib
 
 # Node / frontend
 frontend/node_modules/

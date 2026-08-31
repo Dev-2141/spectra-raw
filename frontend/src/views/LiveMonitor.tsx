@@ -66,7 +66,17 @@ export default function LiveMonitor({ sim }: { sim: SimControls }) {
 
       {/* right column: metrics + decision */}
       <div className="flex min-h-0 flex-col gap-2 overflow-y-auto">
-        <Panel title="Metrics (live)">
+        <Panel
+          title="Metrics (live)"
+          right={
+            s.df?.active ? (
+              <span className="text-[10px] text-rf-scan">
+                DF: {s.df.n_nodes} nodes
+                {s.df.mean_cep_km != null ? ` · CEP ~${s.df.mean_cep_km} km` : ""}
+              </span>
+            ) : undefined
+          }
+        >
           <div className="grid grid-cols-2 gap-1.5">
             <Stat label="P(detection)" value={m.probability_of_detection.toFixed(3)} tone="good" />
             <Stat label="false alarm rate" value={m.false_alarm_rate.toFixed(3)} tone={m.false_alarm_rate > 0.05 ? "bad" : undefined} />
@@ -80,6 +90,43 @@ export default function LiveMonitor({ sim }: { sim: SimControls }) {
             <Stat label="selected band" value={s.receiver.current_band} tone="scan" />
           </div>
         </Panel>
+
+        {s.effects?.has_effects && (
+          <Panel
+            title="Simulated EW effects (synthetic — no RF)"
+            right={
+              s.scenario ? (
+                <span className="text-[10px] text-rf-dim">{s.scenario}</span>
+              ) : undefined
+            }
+          >
+            <div className="grid grid-cols-2 gap-1.5">
+              <Stat
+                label="detection under effect"
+                value={
+                  s.effects.detection_under_effect_rate == null
+                    ? "—"
+                    : s.effects.detection_under_effect_rate.toFixed(3)
+                }
+                hint={`${s.effects.detection_under_effect_n ?? 0} jammed real slots`}
+                tone="warn"
+              />
+              <Stat
+                label="spoof deceptions"
+                value={s.effects.spoof_deception_count ?? 0}
+                hint="chased a decoy"
+                tone="bad"
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {(s.effects.effect_labels ?? []).map((fx, i) => (
+                <Badge key={i} tone="warn">
+                  {fx.kind}: {fx.label} · b{fx.band_lo}-{fx.band_hi}
+                </Badge>
+              ))}
+            </div>
+          </Panel>
+        )}
 
         <Panel title="Active decision">
           {last ? <DecisionCard step={last} /> : <Empty>step to see the scheduler reason</Empty>}

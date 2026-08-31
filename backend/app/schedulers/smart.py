@@ -93,6 +93,15 @@ class PriorityScoreScheduler(BaseScheduler):
             "periodicity": w["periodicity"] * periodicity,
         }
         score = sum(contrib.values())
+
+        # Operator tasking: scale the priority score by per-band watch-list
+        # weights (>=0, default 1.0). Absent -> no change.
+        tw = getattr(context, "tasking_weights", None)
+        if tw is not None and len(tw) == B:
+            tw = np.asarray(tw, dtype=np.float64)
+            score = score * tw
+            contrib["tasking"] = (tw - 1.0) * np.maximum(score, 0.0)
+
         score = score + self.rng.normal(0.0, self.tiebreak, size=B)
 
         band = int(np.argmax(score))

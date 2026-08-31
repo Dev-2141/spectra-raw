@@ -11,9 +11,15 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from ..audit.log import audit
 from ..comparison.engine import compare_strategies
 from ..dataset.generator import build_dataset
 from ..dataset.store import get_store
+from ..hardware.manager import get_hardware_manager
+from ..hardware.recordings import get_recording_meta, list_recordings
+from ..modes.manager import get_mode_manager
+from ..simulation.live_env import LiveRFEnvironment
+from ..tasking.state import get_tasking_state
 from ..models.core import (
     ComparisonReport,
     ComparisonRequest,
@@ -49,7 +55,10 @@ class SimulationManager:
         self._receiver_config = ReceiverConfig()
         self._dataset_id: str | None = None
         self._preset_name: str | None = None
+        self._scenario_name: str | None = None
+        self._effect_specs: list = []
         self._last_comparison: ComparisonReport | None = None
+        self._last_montecarlo = None
         self._training_runs: list[TrainingReport] = []
         self.reset(ResetRequest())
 
@@ -67,17 +76,27 @@ class SimulationManager:
 
     def reset(self, req: ResetRequest) -> dict:
         with self._lock:
+            # Live-ES mode with a running receive-only source: drive the same
+            # Simulation off DSP observations instead of synthetic ground truth.
+            if get_mode_manager().mode == "live_es" and get_hardware_manager().running:
+                return self._build_live_sim(req)
+
             if req.preset is not None:
-                # A preset is an explicit base config -> exits replay mode.
+                # A preset is an explicit base config -> exits replay mode and
+                # clears any loaded scenario's EW effects.
                 env_cfg, rcv_cfg = get_preset(req.preset)
                 self._env_config = env_cfg
                 self._receiver_config = rcv_cfg
                 self._preset_name = req.preset
+                self._scenario_name = None
+                self._effect_specs = []
                 self._dataset_id = None
             if req.environment is not None:
                 # Explicit env config exits dataset-replay mode.
                 self._env_config = req.environment
                 self._dataset_id = None
+                self._scenario_name = None
+                self._effect_specs = []
                 if req.preset is None:
                     self._preset_name = None
             if req.receiver is not None:
@@ -95,8 +114,290 @@ class SimulationManager:
                 scheduler_name=self._scheduler_name,
                 scheduler_params=self._scheduler_params,
                 env_instance=env_instance,
+                protected_bands=get_tasking_state().protected_bands,
+                on_override=self._on_protected_override,
+                tasking_weights=get_tasking_state().band_weights(
+                    self._env_config.num_bands
+                ),
+                ew_effects=(self._effect_specs or None) if env_instance is None else None,
             )
             return self.state()
+
+    # ------------------------------------------------------------------ #
+    def load_scenario(self, scenario_id: str) -> dict:
+        from ..simulation.scenario import get_scenario_store
+
+        from ..df.nodes import default_layout, get_node_registry
+
+        scn = get_scenario_store().get(scenario_id)
+        with self._lock:
+            self._env_config = scn.environment.model_copy(deep=True)
+            self._receiver_config = scn.receiver.model_copy(deep=True)
+            self._effect_specs = [e.model_copy(deep=True) for e in scn.effects]
+            self._scenario_name = scn.name
+            self._preset_name = scn.name
+            self._dataset_id = None
+            get_node_registry().set_nodes(
+                [n.model_copy(deep=True) for n in scn.df_nodes] or default_layout()
+            )
+            self._df_cache = None
+            self._sim = Simulation(
+                env_config=self._env_config,
+                receiver_config=self._receiver_config,
+                scheduler_name=self._scheduler_name,
+                scheduler_params=self._scheduler_params,
+                protected_bands=get_tasking_state().protected_bands,
+                on_override=self._on_protected_override,
+                tasking_weights=get_tasking_state().band_weights(
+                    self._env_config.num_bands
+                ),
+                ew_effects=self._effect_specs or None,
+            )
+            st = self.state()
+            st["loaded_scenario"] = scenario_id
+            return st
+
+    def run_montecarlo(self, req) -> dict:
+        from ..comparison.montecarlo import run_montecarlo
+        from ..simulation.scenario import get_scenario_store
+
+        with self._lock:
+            if req.scenario_id:
+                scn = get_scenario_store().get(req.scenario_id)
+                env = scn.environment
+                rcv = scn.receiver
+                effects = list(scn.effects)
+                sc_name = scn.name
+            else:
+                env = req.environment or self._env_config
+                rcv = req.receiver or self._receiver_config
+                effects = list(req.effects) or list(self._effect_specs)
+                sc_name = self._scenario_name or "current"
+
+            seeds = list(req.seeds) or [
+                req.base_seed + i * 101 for i in range(req.n_seeds)
+            ]
+            report = run_montecarlo(
+                environment=env,
+                receiver=rcv,
+                effects=effects,
+                schedulers=req.schedulers,
+                seeds=seeds,
+                steps=req.steps,
+                scenario_id=req.scenario_id,
+                scenario_name=sc_name,
+            )
+            self._last_montecarlo = report
+            return report.model_dump()
+
+    def last_montecarlo(self):
+        return self._last_montecarlo
+
+    # ------------------------------------------------------------------ #
+    # Signal analysis: tracks / anomaly / forecast / alerts (Step 4)
+    # ------------------------------------------------------------------ #
+    def _analysis_snapshot(self) -> dict:
+        from ..alerting.engine import get_alert_store
+        from ..analysis.anomaly import detect as detect_anomaly
+        from ..analysis.forecast import forecast_tracks
+        from ..analysis.tracks import extract_tracks
+        from ..library.store import get_library
+        from ..tasking.state import get_tasking_state
+
+        with self._lock:
+            sim = self.sim
+            store = get_alert_store()
+            if getattr(self, "_analysis_sim_id", None) != id(sim):
+                store.reset()
+                self._analysis_sim_id = id(sim)
+                self._analysis_cache = None
+
+            up_to = min(sim.t, sim.env.num_time_slots - 1)
+            cache = getattr(self, "_analysis_cache", None)
+            if cache and cache["t"] == up_to:
+                return cache
+
+            lib = get_library().list()
+            track_objs = extract_tracks(sim.env, up_to, library_entries=lib)
+            tracks = [o.to_dict(up_to) for o in track_objs]
+            anomaly = detect_anomaly(sim.env, up_to)
+            forecasts = forecast_tracks(track_objs, up_to)
+            new_alerts = store.evaluate(
+                tracks, anomaly, get_tasking_state().alert_rules
+            )
+            snap = {
+                "t": up_to,
+                "tracks": tracks,
+                "anomaly": anomaly,
+                "forecast": forecasts,
+                "new_alerts": [a.model_dump() for a in new_alerts],
+            }
+            self._analysis_cache = snap
+            return snap
+
+    def tracks(self) -> dict:
+        snap = self._analysis_snapshot()
+        return {"tracks": snap["tracks"], "time_slot": snap["t"]}
+
+    def track(self, track_id: str) -> dict:
+        for tr in self._analysis_snapshot()["tracks"]:
+            if tr["track_id"] == track_id:
+                return tr
+        raise KeyError(track_id)
+
+    def anomaly(self) -> dict:
+        return self._analysis_snapshot()["anomaly"]
+
+    def forecast(self) -> dict:
+        snap = self._analysis_snapshot()
+        return {"forecast": snap["forecast"], "time_slot": snap["t"]}
+
+    def alerts(self, state: str | None = None) -> dict:
+        from ..alerting.engine import get_alert_store
+
+        self._analysis_snapshot()  # refresh
+        store = get_alert_store()
+        return {
+            "alerts": [a.model_dump() for a in store.list(state)],
+            "unacked": store.unacked_count(),
+        }
+
+    def set_alert_state(self, alert_id: str, state: str) -> dict:
+        from ..alerting.engine import get_alert_store
+
+        return get_alert_store().set_state(alert_id, state).model_dump()
+
+    def unacked_alert_count(self) -> int:
+        from ..alerting.engine import get_alert_store
+
+        return get_alert_store().unacked_count()
+
+    # --- tasking (watch lists + alert rules) ------------------------- #
+    def watch_lists(self) -> dict:
+        from ..tasking.state import get_tasking_state
+
+        return {
+            "watch_lists": [w.model_dump() for w in get_tasking_state().watch_lists]
+        }
+
+    def set_watch_lists(self, items) -> dict:
+        from ..tasking.state import get_tasking_state
+
+        out = get_tasking_state().set_watch_lists(items)
+        with self._lock:
+            self._sim._tasking_weights = get_tasking_state().band_weights(
+                self._sim.env.num_bands
+            )
+        return {"watch_lists": [w.model_dump() for w in out]}
+
+    def alert_rules(self) -> dict:
+        from ..tasking.state import get_tasking_state
+
+        return {
+            "alert_rules": [r.model_dump() for r in get_tasking_state().alert_rules]
+        }
+
+    def set_alert_rules(self, items) -> dict:
+        from ..tasking.state import get_tasking_state
+
+        out = get_tasking_state().set_alert_rules(items)
+        return {"alert_rules": [r.model_dump() for r in out]}
+
+    # --- library -------------------------------------------------- #
+    def library(self) -> dict:
+        from ..library.store import get_library
+
+        return {"entries": [e.model_dump() for e in get_library().list()]}
+
+    def library_revisions(self, entry_id: str) -> dict:
+        from ..library.store import get_library
+
+        return {
+            "revisions": [r.model_dump() for r in get_library().revisions(entry_id)]
+        }
+
+    # ------------------------------------------------------------------ #
+    # Direction finding / geolocation (Step 5)
+    # ------------------------------------------------------------------ #
+    def _df_snapshot(self) -> dict:
+        from ..df.engine import DFEngine, df_health, df_summary
+        from ..df.nodes import get_node_registry
+
+        with self._lock:
+            sim = self.sim
+            if not hasattr(self, "_df_engine"):
+                self._df_engine = DFEngine()
+            if getattr(self, "_df_sim_id", None) != id(sim):
+                self._df_engine.reset(id(sim))
+                self._df_sim_id = id(sim)
+                self._df_cache = None
+
+            up_to = min(sim.t, sim.env.num_time_slots - 1)
+            cache = getattr(self, "_df_cache", None)
+            if cache and cache["t"] == up_to:
+                return cache
+
+            tracks = self._analysis_snapshot()["tracks"]
+            nodes = get_node_registry().get_nodes()
+            fixes = self._df_engine.compute(
+                sim.env, tracks, nodes, sim.env_config.seed, up_to
+            )
+            snap = {
+                "t": up_to,
+                "fixes": [f.model_dump() for f in fixes],
+                "health": df_health(nodes, fixes),
+                "summary": df_summary(nodes, fixes),
+            }
+            self._df_cache = snap
+            return snap
+
+    def df_nodes(self) -> dict:
+        from ..df.nodes import get_node_registry
+
+        return {"nodes": [n.model_dump() for n in get_node_registry().get_nodes()]}
+
+    def set_df_nodes(self, nodes) -> dict:
+        from ..df.nodes import get_node_registry
+
+        out = get_node_registry().set_nodes(nodes)
+        with self._lock:
+            self._df_cache = None
+        return {"nodes": [n.model_dump() for n in out]}
+
+    def df_register(self, node) -> dict:
+        from ..df.nodes import get_node_registry
+
+        out = get_node_registry().register(node)
+        with self._lock:
+            self._df_cache = None
+        return out.model_dump()
+
+    def df_fixes(self) -> dict:
+        snap = self._df_snapshot()
+        return {"fixes": snap["fixes"], "summary": snap["summary"], "time_slot": snap["t"]}
+
+    def df_fix(self, track_id: str) -> dict:
+        snap = self._df_snapshot()
+        for f in snap["fixes"]:
+            if f["track_id"] == track_id:
+                return {**f, "history": self._df_engine.history(track_id)}
+        raise KeyError(track_id)
+
+    def df_health(self) -> dict:
+        return self._df_snapshot()["health"]
+
+    def df_summary(self) -> dict:
+        return self._df_snapshot()["summary"]
+
+    def _df_summary_safe(self) -> dict:
+        """Cheap DF summary for the polled state payload — never runs the engine."""
+        from ..df.nodes import get_node_registry
+
+        n = get_node_registry().count()
+        cache = getattr(self, "_df_cache", None)
+        if cache:
+            return cache["summary"]
+        return {"active": False, "n_nodes": n, "fixes": 0, "mean_cep_km": None}
 
     # ------------------------------------------------------------------ #
     # Dataset lab
@@ -140,10 +441,94 @@ class SimulationManager:
                 scheduler_name=self._scheduler_name,
                 scheduler_params=self._scheduler_params,
                 env_instance=store.build_replay_env(dataset_id),
+                protected_bands=get_tasking_state().protected_bands,
+                on_override=self._on_protected_override,
+                tasking_weights=get_tasking_state().band_weights(
+                    self._env_config.num_bands
+                ),
             )
             state = self.state()
             state["loaded_dataset"] = dataset_id
             return state
+
+    # ------------------------------------------------------------------ #
+    def _build_live_sim(self, req: ResetRequest) -> dict:
+        hw = get_hardware_manager()
+        live_env = LiveRFEnvironment(hw.config, hw)
+        self._dataset_id = None
+        self._preset_name = None
+        if req.receiver is not None:
+            self._receiver_config = req.receiver
+        self._scheduler_name = req.scheduler or self._scheduler_name
+        self._scheduler_params = req.scheduler_params or {}
+        self._env_config = RFEnvironmentConfig(
+            num_bands=live_env.num_bands,
+            num_time_slots=live_env.num_time_slots,
+            seed=self._env_config.seed,
+        )
+        self._sim = Simulation(
+            env_config=self._env_config,
+            receiver_config=self._receiver_config,
+            scheduler_name=self._scheduler_name,
+            scheduler_params=self._scheduler_params,
+            env_instance=live_env,
+            protected_bands=get_tasking_state().protected_bands,
+            on_override=self._on_protected_override,
+            tasking_weights=get_tasking_state().band_weights(live_env.num_bands),
+        )
+        return self.state()
+
+    # --- hardware pass-through (Extension Step 2) ---------------------- #
+    def hardware_status(self) -> dict:
+        return get_hardware_manager().status().model_dump()
+
+    def hardware_devices(self) -> list[dict]:
+        return [d.model_dump() for d in get_hardware_manager().list_devices()]
+
+    def configure_hardware(self, config) -> dict:
+        return get_hardware_manager().configure(config).model_dump()
+
+    def start_hardware(self, config=None) -> dict:
+        return get_hardware_manager().start(config).model_dump()
+
+    def stop_hardware(self) -> dict:
+        return get_hardware_manager().stop().model_dump()
+
+    def hardware_frame(self) -> dict | None:
+        frame = get_hardware_manager().latest_frame()
+        return frame.model_dump() if frame else None
+
+    def hardware_frames(self, since: int = -1) -> dict:
+        hw = get_hardware_manager()
+        frames = hw.frames_since(since)
+        return {
+            "frames": [f.model_dump() for f in frames],
+            "latest_seq": frames[-1].seq if frames else since,
+            "observations": [o.model_dump() for o in hw.latest_observations()],
+        }
+
+    def start_recording(self, name: str | None) -> dict:
+        return get_hardware_manager().start_recording(name)
+
+    def stop_recording(self) -> dict:
+        return get_hardware_manager().stop_recording().model_dump()
+
+    def list_recordings(self) -> list[dict]:
+        return [m.model_dump() for m in list_recordings()]
+
+    def get_recording(self, recording_id: str) -> dict:
+        return get_recording_meta(recording_id).model_dump()
+
+    # ------------------------------------------------------------------ #
+    def _on_protected_override(self, time_slot: int, original: int, band: int) -> None:
+        """Audit callback fired when a scan is redirected off a protected band."""
+        audit(
+            "system",
+            "protected_band.override",
+            target=f"band {original}",
+            detail={"time_slot": time_slot, "from": original, "to": band},
+            mode=get_mode_manager().mode,
+        )
 
     # ------------------------------------------------------------------ #
     # Strategy comparison
@@ -349,9 +734,18 @@ class SimulationManager:
             env = sim.env
             t = min(sim.t, env.num_time_slots - 1)
 
+            # Prefer the observed spectrum (== truth on a plain env; jammed /
+            # spoofed under simulated EW effects).
+            power_src = getattr(env, "power_observed", env.power_db)
+            occ_src = getattr(env, "occupancy_observed", env.occupancy)
+            synth_src = getattr(env, "is_synthetic_effect", None)
+
             lo = max(0, t - WATERFALL_SLOTS + 1)
-            power_window = env.power_db[lo : t + 1]
-            occ_window = env.occupancy[lo : t + 1]
+            power_window = power_src[lo : t + 1]
+            occ_window = occ_src[lo : t + 1]
+            synth_window = (
+                synth_src[lo : t + 1] if synth_src is not None else None
+            )
 
             scan_path = [
                 {
@@ -376,6 +770,17 @@ class SimulationManager:
             return {
                 "product": "SPECTRA-SCAN AI",
                 "mode": "simulation-only / receive-only",
+                "platform": get_mode_manager().snapshot(),
+                "live": bool(getattr(sim.env, "live", False)),
+                "metrics_applicability": "proxy"
+                if getattr(sim.env, "live", False)
+                else "ground_truth",
+                "protected_bands": sorted(get_tasking_state().protected_bands),
+                "protected_override_count": int(getattr(sim, "override_count", 0)),
+                "scenario": self._scenario_name,
+                "effects": sim.effect_metrics(),
+                "unacked_alerts": self.unacked_alert_count(),
+                "df": self._df_summary_safe(),
                 "running": not sim.done,
                 "done": sim.done,
                 "time_slot": sim.t,
@@ -406,10 +811,13 @@ class SimulationManager:
                 "bands": [b.model_dump() for b in env.bands],
                 "spectrum": {
                     "time_slot": t,
-                    "power_db": _round_list(env.power_db[t].tolist(), 2),
+                    "power_db": _round_list(power_src[t].tolist(), 2),
                     "active": occ_window[-1].astype(int).tolist()
                     if len(occ_window)
                     else [0] * env.num_bands,
+                    "synthetic_effect": synth_window[-1].astype(int).tolist()
+                    if synth_window is not None and len(synth_window)
+                    else None,
                     "threshold_db": env.noise_floor_db
                     + sim.receiver_config.detection_threshold_db,
                     "threat_prior": _round_list(sim.band_threat_prior.tolist(), 3),
@@ -421,6 +829,9 @@ class SimulationManager:
                     "start_slot": lo,
                     "power_db": [_round_list(row, 2) for row in power_window.tolist()],
                     "active": occ_window.astype(int).tolist(),
+                    "synthetic_effect": synth_window.astype(int).tolist()
+                    if synth_window is not None
+                    else None,
                 },
                 "scan_path": scan_path,
                 "reward_series": reward_series,

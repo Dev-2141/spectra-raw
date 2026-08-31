@@ -1,10 +1,18 @@
-"""HTTP API for SPECTRA-SCAN AI."""
+"""HTTP API for SPECTRA-SCAN AI.
+
+``public_router`` carries only ``/api/health`` (unauthenticated). Everything on
+``router`` requires at least the ``viewer`` role (enforced at the router level);
+mutating endpoints additionally write an audit record.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ..audit.log import audit
+from ..auth.deps import Principal, Role, require_role
 from ..comparison.export import report_to_csv, report_to_html
+from ..modes.manager import get_mode_manager
 from ..reporting import run_report_to_csv, run_report_to_html
 from ..models.core import (
     ComparisonRequest,
@@ -18,16 +26,33 @@ from ..models.core import (
 from ..schedulers.registry import LEARNING_SCHEDULERS, list_schedulers
 from .manager import get_manager
 
-router = APIRouter(prefix="/api", tags=["simulation"])
+public_router = APIRouter(prefix="/api", tags=["public"])
+
+router = APIRouter(
+    prefix="/api",
+    tags=["simulation"],
+    dependencies=[Depends(require_role(Role.viewer))],
+)
+
+_viewer = require_role(Role.viewer)
 
 
-@router.get("/health")
+def _mode() -> str:
+    return get_mode_manager().mode
+
+
+# --------------------------------------------------------------------------- #
+@public_router.get("/health")
 def health() -> dict:
     return {
         "status": "ok",
         "product": "SPECTRA-SCAN AI",
         "mode": "simulation-only / receive-only",
         "transmit_capability": False,
+        "hardware_mode": "receive_only",
+        "platform_mode": get_mode_manager().mode,
+        "auth": "enabled",
+        "version": "0.2.0",
     }
 
 
@@ -50,27 +75,55 @@ def state() -> dict:
 
 
 @router.post("/simulation/reset")
-def simulation_reset(req: ResetRequest | None = None) -> dict:
+def simulation_reset(
+    req: ResetRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().reset(req or ResetRequest())
+        out = get_manager().reset(req or ResetRequest())
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.reset",
+        detail={
+            "preset": getattr(req, "preset", None),
+            "scheduler": getattr(req, "scheduler", None),
+        },
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/step")
-def simulation_step(req: StepRequest | None = None) -> dict:
+def simulation_step(
+    req: StepRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or StepRequest()
     try:
-        return get_manager().step(body.count)
+        out = get_manager().step(body.count)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.step",
+        detail={"count": body.count},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/run")
-def simulation_run(req: RunRequest | None = None) -> dict:
+def simulation_run(
+    req: RunRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or RunRequest()
     try:
-        return get_manager().run(
+        out = get_manager().run(
             steps=body.steps,
             scheduler=body.scheduler,
             params=body.scheduler_params,
@@ -78,26 +131,60 @@ def simulation_run(req: RunRequest | None = None) -> dict:
         )
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.run",
+        detail={"steps": body.steps, "scheduler": body.scheduler, "reset": body.reset},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/train")
-def simulation_train(req: TrainRequest | None = None) -> dict:
+def simulation_train(
+    req: TrainRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or TrainRequest()
     try:
-        return get_manager().train(body)
+        out = get_manager().train(body)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.train",
+        detail={
+            "scheduler": body.scheduler,
+            "episodes": body.episodes,
+            "steps_per_episode": body.steps_per_episode,
+        },
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Dataset lab
 # --------------------------------------------------------------------------- #
 @router.post("/dataset/generate")
-def dataset_generate(req: DatasetGenerateRequest | None = None) -> dict:
+def dataset_generate(
+    req: DatasetGenerateRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().generate_dataset(req or DatasetGenerateRequest())
+        out = get_manager().generate_dataset(req or DatasetGenerateRequest())
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "dataset.generate",
+        detail={"name": getattr(req, "name", None)},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.get("/dataset/list")
@@ -132,22 +219,46 @@ def dataset_preview(dataset_id: str) -> dict:
 
 
 @router.post("/dataset/{dataset_id}/load")
-def dataset_load(dataset_id: str, req: DatasetLoadRequest | None = None) -> dict:
+def dataset_load(
+    dataset_id: str,
+    req: DatasetLoadRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().load_dataset(dataset_id, req or DatasetLoadRequest())
+        out = get_manager().load_dataset(dataset_id, req or DatasetLoadRequest())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "dataset.load",
+        target=dataset_id,
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Strategy comparison
 # --------------------------------------------------------------------------- #
 @router.post("/comparison/run")
-def comparison_run(req: ComparisonRequest | None = None) -> dict:
+def comparison_run(
+    req: ComparisonRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
+    body = req or ComparisonRequest()
     try:
-        return get_manager().run_comparison(req or ComparisonRequest())
+        out = get_manager().run_comparison(body)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "comparison.run",
+        detail={"schedulers": list(body.schedulers), "steps": body.steps},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.get("/comparison/last")
