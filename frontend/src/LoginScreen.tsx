@@ -1,13 +1,32 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { type Role } from "./api";
+import { api } from "./api";
 import { useAuth } from "./auth";
 import { Btn } from "./ui";
 
+const ROLE_BLURB: Record<Role, string> = {
+  viewer: "read-only — every screen, no controls",
+  analyst: "+ acknowledge/close alerts, run analysis",
+  operator: "+ hardware, mode switch, scenarios, tasking, training",
+  admin: "+ user management, audit log",
+};
+
 export default function LoginScreen() {
-  const { login, loginDemo, error } = useAuth();
+  const { login, loginDemo, quickLogin, error } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [demoBusy, setDemoBusy] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
+  const [cfg, setCfg] = useState<{
+    quick_login_enabled: boolean;
+    demo_enabled: boolean;
+    roles: Role[];
+    seed_convention: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    api.authConfig().then(setCfg).catch(() => setCfg(null));
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -15,24 +34,29 @@ export default function LoginScreen() {
     try {
       await login(username.trim(), password);
     } catch {
-      /* error surfaced via context */
+      /* surfaced via context */
     } finally {
       setBusy(false);
     }
   }
 
-  async function skip() {
-    setDemoBusy(true);
+  async function quick(kind: string, fn: () => Promise<void>) {
+    setPending(kind);
     try {
-      await loginDemo();
+      await fn();
+    } catch {
+      /* surfaced via context */
     } finally {
-      setDemoBusy(false);
+      setPending(null);
     }
   }
 
+  const showQuick = cfg?.quick_login_enabled;
+  const showDemo = cfg?.demo_enabled;
+
   return (
-    <div className="grid h-full place-items-center bg-rf-bg text-rf-text">
-      <div className="w-[340px] rounded border border-rf-border bg-rf-panel p-5">
+    <div className="grid h-full place-items-center overflow-auto bg-rf-bg text-rf-text">
+      <div className="w-[380px] rounded border border-rf-border bg-rf-panel p-5">
         <div className="mb-1 text-[13px] font-bold tracking-[0.22em] text-rf-accent">
           SPECTRA-SCAN&nbsp;AI
         </div>
@@ -75,19 +99,59 @@ export default function LoginScreen() {
           </button>
         </form>
 
-        <div className="my-3 flex items-center gap-2 text-[10px] text-rf-dim">
-          <span className="h-px flex-1 bg-rf-border" />
-          or
-          <span className="h-px flex-1 bg-rf-border" />
-        </div>
+        {(showQuick || showDemo) && (
+          <>
+            <div className="my-3 flex items-center gap-2 text-[10px] text-rf-dim">
+              <span className="h-px flex-1 bg-rf-border" />
+              quick sign-in · presentation only
+              <span className="h-px flex-1 bg-rf-border" />
+            </div>
 
-        <Btn onClick={skip} disabled={demoBusy}>
-          {demoBusy ? "entering…" : "Skip — enter demo (read-only)"}
-        </Btn>
-        <div className="mt-2 text-[9px] leading-snug text-rf-dim">
-          Demo is a temporary presentation aid: read-only, simulation only, no
-          hardware or configuration control. Disabled in production.
-        </div>
+            {showQuick && (
+              <div className="flex flex-col gap-1">
+                {(["viewer", "analyst", "operator", "admin"] as Role[]).map((r) => (
+                  <button
+                    key={r}
+                    disabled={pending !== null}
+                    onClick={() => quick(r, () => quickLogin(r))}
+                    className="flex items-center justify-between rounded border border-rf-border bg-rf-panel2 px-2 py-1 text-left text-[11px] transition hover:border-rf-accent disabled:opacity-40"
+                  >
+                    <span className="font-medium text-rf-text">
+                      {pending === r ? "entering…" : `enter as ${r}`}
+                    </span>
+                    <span className="ml-2 text-[9px] text-rf-dim">{ROLE_BLURB[r]}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {showDemo && (
+              <div className="mt-2">
+                <Btn
+                  disabled={pending !== null}
+                  onClick={() => quick("demo", loginDemo)}
+                >
+                  {pending === "demo" ? "entering…" : "read-only demo (no account)"}
+                </Btn>
+              </div>
+            )}
+
+            <div className="mt-2 text-[9px] leading-snug text-rf-dim">
+              Quick sign-in logs into a real seeded account
+              {cfg?.seed_convention ? ` (${cfg.seed_convention})` : ""}. It bypasses
+              password entry, not the user store or RBAC, and is hard-disabled when
+              the server runs in production or without seed users. The demo session
+              is read-only and simulation-only.
+            </div>
+          </>
+        )}
+
+        {cfg && !showQuick && !showDemo && (
+          <div className="mt-3 text-[9px] text-rf-dim">
+            Production mode: quick sign-in and demo are disabled. Use issued
+            credentials.
+          </div>
+        )}
       </div>
     </div>
   );

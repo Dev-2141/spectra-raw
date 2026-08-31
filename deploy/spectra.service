@@ -1,0 +1,33 @@
+# /etc/systemd/system/spectra.service
+# systemctl daemon-reload && systemctl enable --now spectra
+
+[Unit]
+Description=SPECTRA-SCAN AI (receive-only spectrum surveillance platform)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spectra
+WorkingDirectory=/opt/spectra/backend
+EnvironmentFile=/etc/spectra/spectra.env
+# spectra.env must set: SPECTRA_PRODUCTION=1, SPECTRA_JWT_KEY, SPECTRA_SEED_USERS=0,
+#   SPECTRA_TLS_CERT, SPECTRA_TLS_KEY, SPECTRA_CORS_ORIGINS, SPECTRA_DF_NODE_KEY,
+#   SPECTRA_DATA_DIR, SPECTRA_SERVE_FRONTEND=1
+ExecStart=/opt/spectra/backend/.venv/bin/python -m uvicorn app.main:app \
+  --host 0.0.0.0 --port 8443 \
+  --ssl-certfile ${SPECTRA_TLS_CERT} --ssl-keyfile ${SPECTRA_TLS_KEY}
+Restart=on-failure
+RestartSec=3
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/spectra/data
+# offline: the service needs no egress
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

@@ -13,6 +13,7 @@ import Library from "./views/Library";
 import LiveMonitor from "./views/LiveMonitor";
 import Reports from "./views/Reports";
 import ScenarioEditor from "./views/ScenarioEditor";
+import Sessions from "./views/Sessions";
 import SignalsTracks from "./views/SignalsTracks";
 import Sim2Real from "./views/Sim2Real";
 import StrategyComparison from "./views/StrategyComparison";
@@ -31,6 +32,7 @@ const BASE_TABS = [
   "Dataset Lab",
   "Training Runs",
   "Sim-to-Real",
+  "Sessions",
   "Explainability Log",
   "Reports",
 ] as const;
@@ -43,6 +45,8 @@ const NO_SIDEBAR: Tab[] = [
   "Geolocation",
   "Library",
   "Tasking & Alerts",
+  "Sessions",
+  "Sim-to-Real",
 ];
 
 export default function App() {
@@ -189,15 +193,28 @@ export default function App() {
           </span>
 
           {/* connection */}
-          <span className="flex items-center gap-1.5">
+          <span
+            className="flex items-center gap-1.5"
+            title={
+              sim.streaming
+                ? "live updates over /ws"
+                : sim.connected
+                  ? "connected — polling (ws fallback)"
+                  : "offline"
+            }
+          >
             <span
               className={
                 "h-2 w-2 rounded-full " +
-                (sim.connected ? "bg-rf-accent" : "bg-rf-alert")
+                (sim.streaming
+                  ? "bg-rf-accent"
+                  : sim.connected
+                    ? "bg-rf-warn"
+                    : "bg-rf-alert")
               }
             />
             <span className="text-rf-dim">
-              {sim.connected ? "online" : "offline"}
+              {sim.streaming ? "live ⇅" : sim.connected ? "polling" : "offline"}
             </span>
           </span>
 
@@ -245,6 +262,7 @@ export default function App() {
           {tab === "Dataset Lab" && <DatasetLab sim={sim} />}
           {tab === "Training Runs" && <TrainingRuns />}
           {tab === "Sim-to-Real" && <Sim2Real />}
+          {tab === "Sessions" && <Sessions />}
           {tab === "Explainability Log" && <ExplainabilityLog />}
           {tab === "Reports" && <Reports />}
           {tab === "Admin" && isAdmin && <Admin />}

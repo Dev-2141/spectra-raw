@@ -560,6 +560,20 @@ export interface PolicyGrid {
   detail?: string;
 }
 
+export interface SessionRow {
+  session_id: string;
+  name: string;
+  tags: string[];
+  mode: string;
+  scenario: string;
+  scheduler: string;
+  started_at: string;
+  finished_at: string;
+  status: string;
+  row_counts: Record<string, number>;
+  schema_version: number;
+}
+
 export interface Metrics {
   steps: number;
   total_reward: number;
@@ -841,6 +855,15 @@ export const api = {
   login: (username: string, password: string) =>
     jpost<TokenResponse>("/api/auth/login", { username, password }),
   demo: () => jpost<TokenResponse>("/api/auth/demo"),
+  quickLogin: (role: Role) =>
+    jpost<TokenResponse>("/api/auth/quick-login", { role }),
+  authConfig: () =>
+    jget<{
+      quick_login_enabled: boolean;
+      demo_enabled: boolean;
+      roles: Role[];
+      seed_convention: string | null;
+    }>("/api/auth/config"),
   me: () => jget<MeResponse>("/api/auth/me"),
   logout: () => jpost<{ ok: boolean }>("/api/auth/logout"),
   changePassword: (current_password: string, new_password: string) =>
@@ -1010,6 +1033,20 @@ export const api = {
     steps: number;
     noise_shift_db: number;
   }) => jpost<RealityGapReport>("/api/sim2real/gap", body),
+
+  // --- durable sessions ------------------------------------------- //
+  sessions: () => jget<{ sessions: SessionRow[] }>("/api/sessions"),
+  sessionStart: (name: string, tags: string[]) =>
+    jpost<{ session_id: string; recording: boolean }>("/api/sessions/start", {
+      name,
+      tags,
+    }),
+  sessionFinish: () => jpost<SessionRow>("/api/sessions/finish"),
+  sessionData: (id: string, kind: string) =>
+    jget<{ rows: Array<Record<string, unknown>> }>(
+      `/api/sessions/${id}/data/${kind}`,
+    ),
+  sessionExportUrl: (id: string) => `${BASE}/api/sessions/${id}/export`,
 
   schedulers: () =>
     jget<{ schedulers: string[]; learning_schedulers: string[] }>("/api/schedulers"),

@@ -12,8 +12,10 @@ from .passwords import hash_password, verify_password
 ROLES: tuple[str, ...] = ("viewer", "analyst", "operator", "admin")
 
 # username, password, role  — seeded only when SPECTRA_SEED_USERS is true.
+# Convention: username == role == password (dev only; quick-login relies on it).
 _SEED_USERS: list[tuple[str, str, str]] = [
     ("admin", "admin", "admin"),
+    ("operator", "operator", "operator"),
     ("analyst", "analyst", "analyst"),
     ("viewer", "viewer", "viewer"),
     ("demo", "demo", "viewer"),

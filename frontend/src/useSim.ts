@@ -4,6 +4,7 @@ import { api, type ResetBody, type SimState } from "./api";
 export interface SimControls {
   state: SimState | null;
   connected: boolean;
+  streaming: boolean;
   busy: boolean;
   error: string | null;
   playing: boolean;
@@ -22,6 +23,7 @@ const TICK_MS = 700;
 export function useSim(): SimControls {
   const [state, setState] = useState<SimState | null>(null);
   const [connected, setConnected] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -61,6 +63,47 @@ export function useSim(): SimControls {
 
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Live updates over /ws (server-push refresh); polling stays as the fallback.
+  useEffect(() => {
+    let token: string | null = null;
+    try {
+      token = window.localStorage.getItem("spectra_token");
+    } catch {
+      token = null;
+    }
+    if (!token) return;
+
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let retry = 0;
+    const connect = () => {
+      const proto = window.location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(
+        `${proto}://${window.location.host}/ws?token=${encodeURIComponent(token!)}`,
+      );
+      ws.onopen = () => setStreaming(true);
+      ws.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          if (evt.type === "state" && !inflight.current) refresh();
+        } catch {
+          /* ignore malformed frame */
+        }
+      };
+      ws.onclose = () => {
+        setStreaming(false);
+        if (!closed) retry = window.setTimeout(connect, 2500);
+      };
+      ws.onerror = () => ws?.close();
+    };
+    connect();
+    return () => {
+      closed = true;
+      window.clearTimeout(retry);
+      ws?.close();
+    };
   }, [refresh]);
 
   // play loop
@@ -114,6 +157,7 @@ export function useSim(): SimControls {
   return {
     state,
     connected,
+    streaming,
     busy,
     error,
     playing,

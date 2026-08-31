@@ -13,6 +13,7 @@ import {
   setAuthToken,
   setUnauthorizedHandler,
   type Role,
+  type TokenResponse,
 } from "./api";
 
 const STORAGE_KEY = "spectra_token";
@@ -31,6 +32,7 @@ interface AuthContextValue {
   error: string | null;
   login: (username: string, password: string) => Promise<void>;
   loginDemo: () => Promise<void>;
+  quickLogin: (role: Role) => Promise<void>;
   logout: () => void;
   hasRole: (min: Role) => boolean;
 }
@@ -113,9 +115,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const loginDemo = useCallback(async () => {
-    setError(null);
-    const r = await api.demo();
+  const applyToken = useCallback((r: TokenResponse) => {
     setAuthToken(r.access_token);
     writeStoredToken(r.access_token);
     setSession({
@@ -123,9 +123,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       username: r.username,
       role: r.role,
       demo: r.demo,
-      mustChangePassword: false,
+      mustChangePassword: r.must_change_password,
     });
   }, []);
+
+  const loginDemo = useCallback(async () => {
+    setError(null);
+    applyToken(await api.demo());
+  }, [applyToken]);
+
+  const quickLogin = useCallback(
+    async (role: Role) => {
+      setError(null);
+      try {
+        applyToken(await api.quickLogin(role));
+      } catch (e) {
+        setError(e instanceof Error ? `Quick sign-in failed (${role})` : String(e));
+        throw e;
+      }
+    },
+    [applyToken],
+  );
 
   const logout = useCallback(() => {
     api.logout().catch(() => undefined);
@@ -138,8 +156,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<AuthContextValue>(
-    () => ({ ready, session, error, login, loginDemo, logout, hasRole }),
-    [ready, session, error, login, loginDemo, logout, hasRole],
+    () => ({ ready, session, error, login, loginDemo, quickLogin, logout, hasRole }),
+    [ready, session, error, login, loginDemo, quickLogin, logout, hasRole],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

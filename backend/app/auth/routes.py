@@ -13,6 +13,7 @@ from .models import (
     CreateUserRequest,
     LoginRequest,
     MeResponse,
+    QuickLoginRequest,
     ResetPasswordRequest,
     SetRoleRequest,
     TokenResponse,
@@ -68,6 +69,59 @@ def demo_login() -> TokenResponse:
         demo=True,
         must_change_password=False,
         expires_in=get_settings().token_ttl_hours * 3600,
+    )
+
+
+@router.get("/config")
+def auth_config() -> dict:
+    """Unauthenticated: what the login screen may offer.
+
+    ``quick_login`` and the demo session both exist ONLY for local development
+    / presentations and are hard-disabled when ``SPECTRA_PRODUCTION`` is set or
+    when seed users are turned off. No passwords are ever returned.
+    """
+    s = get_settings()
+    quick = bool(s.seed_users and not s.production)
+    return {
+        "quick_login_enabled": quick,
+        "demo_enabled": not s.production,
+        "roles": list(ROLES),
+        # dev-seed convention, shown so a presenter knows what is happening
+        "seed_convention": "username = role = password" if quick else None,
+    }
+
+
+@router.post("/quick-login", response_model=TokenResponse)
+def quick_login(body: QuickLoginRequest) -> TokenResponse:
+    """Issue a real token for the seeded user of a chosen role. Dev only.
+
+    Bypasses password entry but NOT the user store: it logs in as an actual
+    seeded account (username == role) and is refused in production or without
+    seed users. It cannot mint a session for a user that does not exist.
+    """
+    settings = get_settings()
+    if settings.production or not settings.seed_users:
+        raise HTTPException(
+            status_code=403,
+            detail="quick-login is disabled (production or seed users off)",
+        )
+    role = body.role.strip().lower()
+    if role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {ROLES}")
+
+    row = get_user_store().get_user(role)  # seeded username == role
+    if not row or row["role"] != role:
+        raise HTTPException(
+            status_code=403, detail=f"no seeded '{role}' account to quick-login as"
+        )
+    audit(role, "auth.quick_login", role, {"role": role}, mode=_mode(), role=role)
+    return TokenResponse(
+        access_token=_issue(role, demo=False),
+        username=role,
+        role=role,
+        demo=False,
+        must_change_password=bool(row["must_change_password"]),
+        expires_in=settings.token_ttl_hours * 3600,
     )
 
 

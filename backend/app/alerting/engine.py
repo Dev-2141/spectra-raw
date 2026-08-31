@@ -51,6 +51,12 @@ class AlertStore:
         )
         self._alerts.append(alert)
         del self._alerts[:-_MAX_ALERTS]
+        try:
+            from ..stream.hub import get_stream_hub
+
+            get_stream_hub().publish("alert", alert.model_dump())
+        except Exception:  # pragma: no cover - streaming must never break alerting
+            pass
         return alert
 
     def evaluate(self, tracks: list[dict], anomaly: dict, rules: list) -> list[Alert]:

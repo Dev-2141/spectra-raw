@@ -58,6 +58,11 @@ class Settings(BaseModel):
     protected_bands: list[int]
     rate_limit_rpm: int
     df_node_key: str
+    tls_cert_path: str
+    tls_key_path: str
+    retention_days: int
+    db_encryption_key: str
+    serve_frontend: bool
 
     # Feature flags — declared now, consumed by later extension steps.
     flag_soapysdr: bool
@@ -98,6 +103,11 @@ def get_settings() -> Settings:
         protected_bands=_int_list("SPECTRA_PROTECTED_BANDS", []),
         rate_limit_rpm=_int("SPECTRA_RATE_LIMIT_RPM", 600),
         df_node_key=os.getenv("SPECTRA_DF_NODE_KEY", "spectra-df-lan-key"),
+        tls_cert_path=os.getenv("SPECTRA_TLS_CERT", ""),
+        tls_key_path=os.getenv("SPECTRA_TLS_KEY", ""),
+        retention_days=_int("SPECTRA_RETENTION_DAYS", 30),
+        db_encryption_key=os.getenv("SPECTRA_DB_ENCRYPTION_KEY", ""),
+        serve_frontend=_flag("SPECTRA_SERVE_FRONTEND", production),
         flag_soapysdr=_flag("FLAG_SOAPYSDR", False),
         flag_torch_rl=_flag("FLAG_TORCH_RL", False),
         flag_torch_classifier=_flag("FLAG_TORCH_CLASSIFIER", False),
@@ -107,6 +117,31 @@ def get_settings() -> Settings:
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings
+
+
+class InsecureProductionConfig(RuntimeError):
+    """Raised when --production is set but an insecure default remains."""
+
+
+def validate_production(settings: "Settings | None" = None) -> list[str]:
+    """Return the list of production violations; raise if any and production is on."""
+    s = settings or get_settings()
+    if not s.production:
+        return []
+    problems: list[str] = []
+    if s.jwt_key_is_default:
+        problems.append("SPECTRA_JWT_KEY is the built-in default")
+    if s.seed_users:
+        problems.append("SPECTRA_SEED_USERS is on (seeded admin/admin etc.)")
+    if not (s.tls_cert_path and s.tls_key_path):
+        problems.append("no SPECTRA_TLS_CERT / SPECTRA_TLS_KEY configured")
+    if "localhost" in " ".join(s.cors_origins) or "127.0.0.1" in " ".join(s.cors_origins):
+        problems.append("CORS still allows localhost origins")
+    if problems:
+        raise InsecureProductionConfig(
+            "refusing to start in production: " + "; ".join(problems)
+        )
+    return problems
 
 
 def _reset_for_tests() -> None:

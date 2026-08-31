@@ -283,3 +283,37 @@ def test_cannot_delete_last_admin():
     r = client.delete("/api/auth/users/admin", headers=_h(admin))
     # blocked either as "own account" or "last admin"
     assert r.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# Quick sign-in (login-screen role picker) — dev only
+# --------------------------------------------------------------------------- #
+def test_auth_config_advertises_quick_login_in_dev():
+    cfg = client.get("/api/auth/config").json()
+    assert cfg["quick_login_enabled"] is True
+    assert cfg["demo_enabled"] is True
+    assert "admin" in cfg["roles"]
+    assert cfg["seed_convention"] == "username = role = password"
+
+
+def test_quick_login_issues_a_real_scoped_token_per_role():
+    for role in ("viewer", "analyst", "operator", "admin"):
+        r = client.post("/api/auth/quick-login", json={"role": role})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["role"] == role and body["demo"] is False
+        me = client.get("/api/auth/me", headers=_h(body["access_token"])).json()
+        assert me["username"] == role and me["role"] == role
+
+    # operator token really has operator power (mode switch is operator+)
+    op = client.post("/api/auth/quick-login", json={"role": "operator"}).json()["access_token"]
+    assert client.post(
+        "/api/mode", json={"mode": "live_es", "confirm": True}, headers=_h(op)
+    ).status_code == 200
+    client.post("/api/mode", json={"mode": "simulation", "confirm": True}, headers=_h(op))
+
+    # unknown role rejected; quick-login is audited
+    assert client.post("/api/auth/quick-login", json={"role": "root"}).status_code == 400
+    admin = _login("admin", "admin")
+    aud = client.get("/api/audit?action=auth.quick_login", headers=_h(admin)).json()["entries"]
+    assert any(a["action"] == "auth.quick_login" for a in aud)

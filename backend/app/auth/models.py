@@ -12,6 +12,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class QuickLoginRequest(BaseModel):
+    role: str  # viewer | analyst | operator | admin — dev/presentation only
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

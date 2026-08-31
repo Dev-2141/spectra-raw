@@ -57,7 +57,7 @@ def health() -> dict:
         "hardware_mode": "receive_only",
         "platform_mode": get_mode_manager().mode,
         "auth": "enabled",
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 

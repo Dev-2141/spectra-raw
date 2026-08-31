@@ -691,7 +691,95 @@ class SimulationManager:
             state = self.state()
             state["last_step"] = last.model_dump() if last else None
             state["steps_executed"] = len(results)
+            self._publish_and_record(state, results)
             return state
+
+    # ------------------------------------------------------------------ #
+    def _publish_and_record(self, state: dict, results: list) -> None:
+        """Push a state event to /ws and record rows to the active session."""
+        try:
+            from ..stream.hub import get_stream_hub
+
+            get_stream_hub().publish(
+                "state",
+                {
+                    "time_slot": state.get("time_slot"),
+                    "scheduler": state.get("scheduler"),
+                    "metrics": state.get("metrics"),
+                    "unacked_alerts": state.get("unacked_alerts"),
+                },
+            )
+        except Exception:  # pragma: no cover - streaming must never break a step
+            pass
+        if not results:
+            return
+        try:
+            from ..store.sessions import get_session_store
+
+            st = get_session_store()
+            if st.active_id:
+                st.record(
+                    "decisions",
+                    [
+                        {
+                            "time_slot": r.time_slot,
+                            "scheduler": r.decision.scheduler,
+                            "selected_band": r.decision.selected_band,
+                            "detected": bool(r.detection.detected),
+                            "false_alarm": bool(r.detection.false_alarm),
+                            "reward": float(r.reward),
+                        }
+                        for r in results
+                    ],
+                )
+                m = state.get("metrics", {})
+                st.record("metrics", [{"time_slot": state.get("time_slot"), **m}])
+        except Exception:  # pragma: no cover
+            pass
+
+    # --- durable sessions (Step 7) --------------------------------- #
+    def session_start(self, name: str, tags: list) -> dict:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().start(
+            name,
+            list(tags),
+            {
+                "mode": get_mode_manager().mode,
+                "scenario": self._scenario_name or self._preset_name or "",
+                "scheduler": self._scheduler_name,
+            },
+        )
+
+    def session_finish(self) -> dict:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().finish()
+
+    def session_list(self) -> list[dict]:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().list()
+
+    def session_meta(self, sid: str) -> dict:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().meta(sid)
+
+    def session_data(self, sid: str, kind: str) -> list[dict]:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().data(sid, kind)
+
+    def session_export(self, sid: str) -> bytes:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().export_zip(sid)
+
+    def session_import(self, blob: bytes) -> dict:
+        from ..store.sessions import get_session_store
+
+        return get_session_store().import_zip(blob)
 
     def run(self, steps: int, scheduler: str | None, params: dict, reset: bool) -> dict:
         with self._lock:
@@ -712,6 +800,7 @@ class SimulationManager:
             state["steps_executed"] = len(results)
             state["last_step"] = results[-1].model_dump() if results else None
             state["metrics"] = self.sim.metrics_snapshot().model_dump()
+            self._publish_and_record(state, results)
             return state
 
     # ------------------------------------------------------------------ #
