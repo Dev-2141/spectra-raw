@@ -141,6 +141,13 @@ class ScanDecision(BaseModel):
     predicted_active: Optional[bool] = Field(
         None, description="Scheduler's prediction of band activity, if it makes one."
     )
+    counterfactual: Optional[dict] = Field(
+        None,
+        description=(
+            "Runner-up band + the single factor that would flip the choice: "
+            "{alt_band, flip_factor, margin}."
+        ),
+    )
     reasons: list[str] = Field(default_factory=list, description="Top factors (<=3).")
     alternatives: list[int] = Field(
         default_factory=list, description="Runner-up candidate bands."
@@ -782,6 +789,102 @@ class WatchListsRequest(BaseModel):
 
 class AlertRulesRequest(BaseModel):
     alert_rules: list[AlertRule] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Deep-RL / online learning / sim-to-real (Extension Step 6)
+# --------------------------------------------------------------------------- #
+class RLTrainRequest(BaseModel):
+    scheduler: str = "contextual_bandit"
+    scheduler_params: dict = Field(default_factory=dict)
+    episodes: int = Field(12, ge=1, le=500)
+    steps_per_episode: int = Field(600, ge=50, le=20000)
+    curriculum: bool = False
+    scenario_id: Optional[str] = None
+    base_seed: int = 20260906
+
+
+class RLJob(BaseModel):
+    job_id: str
+    scheduler: str
+    status: str  # queued | running | done | failed
+    created_at: str
+    updated_at: str
+    episodes: int
+    episodes_done: int
+    curriculum: bool
+    stage: Optional[str] = None
+    learning_curve: list[float] = Field(default_factory=list)
+    curriculum_stages: list[dict] = Field(default_factory=list)
+    best_avg_reward: Optional[float] = None
+    final_avg_reward: Optional[float] = None
+    checkpoint: Optional[str] = None
+    error: Optional[str] = None
+    promoted: bool = False
+
+
+class OnlineEnableRequest(BaseModel):
+    scheduler: str = "contextual_bandit"
+    margin: float = Field(1.5, ge=0.0, le=20.0)
+    window: int = Field(80, ge=10, le=2000)
+
+
+class OnlineStatus(BaseModel):
+    enabled: bool = False
+    active_scheduler: str = ""
+    shadow_scheduler: str = "priority"
+    policy_reward_ema: float = 0.0
+    shadow_reward_ema: float = 0.0
+    margin: float = 0.0
+    window: int = 0
+    breaches: int = 0
+    reverted: bool = False
+    reverted_at_slot: Optional[int] = None
+    updates: int = 0
+
+
+class Sim2RealCalibrateRequest(BaseModel):
+    recording_id: str
+    name: Optional[str] = None
+
+
+class CalibrationProfile(BaseModel):
+    profile_id: str
+    name: str
+    recording_id: str
+    created_at: str
+    num_bands: int
+    noise_floor_db: float
+    emitter_density: float
+    snr_min_db: float
+    snr_max_db: float
+    false_alarm_prob: float
+    stats: dict = Field(default_factory=dict)
+
+
+class Sim2RealGapRequest(BaseModel):
+    recording_id: str
+    profile_id: str
+    scheduler: str = "priority"
+    steps: int = Field(600, ge=50, le=10000)
+    noise_shift_db: float = 0.0  # inject a deliberate profile mismatch (testing)
+
+
+class MetricGap(BaseModel):
+    metric: str
+    recording_value: float
+    sim_value: float
+    gap: float
+
+
+class RealityGapReport(BaseModel):
+    recording_id: str
+    profile_id: str
+    scheduler: str
+    steps: int
+    metrics: list[MetricGap]
+    gap_score: float
+    narrative: str
 
 
 # Resolve the forward reference RFEnvironmentConfig -> EmitterSpec (defined later).

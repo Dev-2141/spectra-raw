@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type ExplainRow } from "../api";
+import { api, type ExplainRow, type PolicyGrid } from "../api";
 import { Badge, Btn, Empty, ErrorBanner, OutcomeTag, Panel } from "../ui";
 
 export default function ExplainabilityLog() {
@@ -27,6 +27,15 @@ export default function ExplainabilityLog() {
     return () => window.clearInterval(id);
   }, [auto, refresh]);
 
+  const [grid, setGrid] = useState<PolicyGrid | null>(null);
+  useEffect(() => {
+    if (!auto) return;
+    const tick = () => api.explainPolicy().then(setGrid).catch(() => undefined);
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => window.clearInterval(id);
+  }, [auto]);
+
   const shown = rows
     .filter((r) => filter === "all" || r.outcome === filter)
     .slice()
@@ -34,6 +43,50 @@ export default function ExplainabilityLog() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2">
+      {grid?.available && grid.grid && grid.features && (
+        <Panel title={`Policy attribution — ${grid.scheduler} (feature × band)`}>
+          <div className="overflow-x-auto">
+            <table className="text-[9px] tabular-nums">
+              <tbody>
+                {grid.features.map((f, fi) => {
+                  const row = grid.grid![fi];
+                  const max = Math.max(1e-6, ...row.map((v) => Math.abs(v)));
+                  return (
+                    <tr key={f}>
+                      <td className="pr-2 text-right text-rf-dim">{f}</td>
+                      {row.map((v, bi) => {
+                        const a = Math.min(1, Math.abs(v) / max);
+                        const col =
+                          v >= 0
+                            ? `rgba(51,209,122,${a.toFixed(2)})`
+                            : `rgba(239,71,111,${a.toFixed(2)})`;
+                        return (
+                          <td
+                            key={bi}
+                            title={`band ${bi}: ${v}`}
+                            style={{ background: col }}
+                            className="h-3 w-2 border border-rf-bg"
+                          />
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+                {grid.q_values && (
+                  <tr>
+                    <td className="pr-2 text-right text-rf-scan">Q</td>
+                    {grid.q_values.map((q, bi) => (
+                      <td key={bi} className="px-0.5 text-rf-scan" title={`band ${bi}`}>
+                        {q.toFixed(1)}
+                      </td>
+                    ))}
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
       <Panel title="Explainability log — every scheduler decision and why">
         <div className="flex flex-wrap items-center gap-1.5">
           <Btn active={auto} onClick={() => setAuto((v) => !v)}>
@@ -69,6 +122,7 @@ export default function ExplainabilityLog() {
                 <th className="px-2 text-left font-normal">pred</th>
                 <th className="text-left font-normal">outcome</th>
                 <th className="px-2 text-right font-normal">reward</th>
+                <th className="px-2 text-left font-normal">counterfactual</th>
                 <th className="pl-3 text-left font-normal">explanation / top factors</th>
               </tr>
             </thead>
@@ -86,7 +140,12 @@ export default function ExplainabilityLog() {
                   <td className={`px-2 text-right ${r.reward >= 0 ? "text-rf-accent" : "text-rf-alert"}`}>
                     {r.reward.toFixed(1)}
                   </td>
-                  <td className="max-w-[520px] whitespace-normal pl-3">
+                  <td className="px-2 text-[10px] text-rf-dim">
+                    {r.counterfactual
+                      ? `→b${r.counterfactual.alt_band} if ${r.counterfactual.flip_factor} (Δ${r.counterfactual.margin})`
+                      : "—"}
+                  </td>
+                  <td className="max-w-[480px] whitespace-normal pl-3">
                     <div className="text-rf-text">{r.explanation}</div>
                     <div className="mt-0.5 flex flex-wrap gap-1">
                       {r.reasons.map((x, j) => (

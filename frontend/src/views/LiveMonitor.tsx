@@ -91,6 +91,54 @@ export default function LiveMonitor({ sim }: { sim: SimControls }) {
           </div>
         </Panel>
 
+        {s.online?.enabled && (
+          <Panel
+            title="Online learning"
+            right={
+              s.online.reverted ? (
+                <span className="rounded border border-rf-alert/50 px-1.5 py-0.5 text-[10px] text-rf-alert">
+                  reverted to priority @ t{s.online.reverted_at_slot}
+                </span>
+              ) : (
+                <span className="text-[10px] text-rf-accent">
+                  {s.online.active_scheduler} vs shadow
+                </span>
+              )
+            }
+          >
+            <div className="grid grid-cols-2 gap-1.5">
+              <Stat
+                label="policy reward EMA"
+                value={s.online.policy_reward_ema.toFixed(2)}
+                tone={
+                  s.online.policy_reward_ema >= s.online.shadow_reward_ema
+                    ? "good"
+                    : "bad"
+                }
+              />
+              <Stat
+                label="shadow (priority) EMA"
+                value={s.online.shadow_reward_ema.toFixed(2)}
+              />
+              <Stat label="breaches" value={s.online.breaches} tone="warn" />
+              <Stat label="updates" value={s.online.updates} />
+            </div>
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-rf-panel2">
+              <div
+                className={
+                  "h-full " +
+                  (s.online.policy_reward_ema >= s.online.shadow_reward_ema
+                    ? "bg-rf-accent"
+                    : "bg-rf-alert")
+                }
+                style={{
+                  width: `${Math.min(100, Math.max(4, 50 + (s.online.policy_reward_ema - s.online.shadow_reward_ema) * 10))}%`,
+                }}
+              />
+            </div>
+          </Panel>
+        )}
+
         {s.effects?.has_effects && (
           <Panel
             title="Simulated EW effects (synthetic — no RF)"

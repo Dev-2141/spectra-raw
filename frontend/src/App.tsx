@@ -14,6 +14,7 @@ import LiveMonitor from "./views/LiveMonitor";
 import Reports from "./views/Reports";
 import ScenarioEditor from "./views/ScenarioEditor";
 import SignalsTracks from "./views/SignalsTracks";
+import Sim2Real from "./views/Sim2Real";
 import StrategyComparison from "./views/StrategyComparison";
 import TaskingAlerts from "./views/TaskingAlerts";
 import TrainingRuns from "./views/TrainingRuns";
@@ -29,6 +30,7 @@ const BASE_TABS = [
   "Strategy Comparison",
   "Dataset Lab",
   "Training Runs",
+  "Sim-to-Real",
   "Explainability Log",
   "Reports",
 ] as const;
@@ -242,6 +244,7 @@ export default function App() {
           {tab === "Strategy Comparison" && <StrategyComparison />}
           {tab === "Dataset Lab" && <DatasetLab sim={sim} />}
           {tab === "Training Runs" && <TrainingRuns />}
+          {tab === "Sim-to-Real" && <Sim2Real />}
           {tab === "Explainability Log" && <ExplainabilityLog />}
           {tab === "Reports" && <Reports />}
           {tab === "Admin" && isAdmin && <Admin />}

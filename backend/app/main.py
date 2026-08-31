@@ -14,8 +14,10 @@ from .api.hardware_routes import router as hardware_router
 from .api.library_routes import router as library_router
 from .api.montecarlo_routes import router as montecarlo_router
 from .api.platform_routes import router as platform_router
+from .api.rl_routes import router as rl_router
 from .api.routes import public_router, router
 from .api.scenario_routes import router as scenario_router
+from .api.sim2real_routes import router as sim2real_router
 from .api.tasking_routes import router as tasking_router
 from .auth.routes import router as auth_router
 from .config import get_settings
@@ -55,6 +57,8 @@ app.include_router(analysis_router)
 app.include_router(library_router)
 app.include_router(tasking_router)
 app.include_router(df_router)
+app.include_router(rl_router)
+app.include_router(sim2real_router)
 app.include_router(router)
 
 

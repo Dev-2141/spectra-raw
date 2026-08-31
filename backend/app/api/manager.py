@@ -116,6 +116,7 @@ class SimulationManager:
                 env_instance=env_instance,
                 protected_bands=get_tasking_state().protected_bands,
                 on_override=self._on_protected_override,
+                on_step_hook=self._online_step,
                 tasking_weights=get_tasking_state().band_weights(
                     self._env_config.num_bands
                 ),
@@ -148,6 +149,7 @@ class SimulationManager:
                 scheduler_params=self._scheduler_params,
                 protected_bands=get_tasking_state().protected_bands,
                 on_override=self._on_protected_override,
+                on_step_hook=self._online_step,
                 tasking_weights=get_tasking_state().band_weights(
                     self._env_config.num_bands
                 ),
@@ -400,6 +402,119 @@ class SimulationManager:
         return {"active": False, "n_nodes": n, "fixes": 0, "mean_cep_km": None}
 
     # ------------------------------------------------------------------ #
+    # RL training / online learning / sim-to-real / explainability++ (Step 6)
+    # ------------------------------------------------------------------ #
+    def rl_submit(self, req) -> dict:
+        from ..rl.train import get_rl_manager
+
+        return get_rl_manager().submit(req).model_dump()
+
+    def rl_jobs(self) -> dict:
+        from ..rl.train import get_rl_manager
+
+        return {"jobs": [j.model_dump() for j in get_rl_manager().list_jobs()]}
+
+    def rl_job(self, job_id: str) -> dict:
+        from ..rl.train import get_rl_manager
+
+        return get_rl_manager().get_job(job_id).model_dump()
+
+    def rl_promote(self, job_id: str) -> dict:
+        from ..rl.train import get_rl_manager
+
+        return get_rl_manager().promote(job_id).model_dump()
+
+    # --- online learning ------------------------------------------- #
+    def enable_online(self, req) -> dict:
+        from ..rl.online import get_online_manager
+
+        with self._lock:
+            get_online_manager().enable(req.scheduler, req.margin, req.window)
+            self._scheduler_name = req.scheduler
+        self.reset(ResetRequest(scheduler=req.scheduler))
+        return get_online_manager().status().model_dump()
+
+    def disable_online(self) -> dict:
+        from ..rl.online import get_online_manager
+
+        return get_online_manager().disable().model_dump()
+
+    def online_status(self) -> dict:
+        from ..rl.online import get_online_manager
+
+        return get_online_manager().status().model_dump()
+
+    def _online_step(self, sim, result) -> None:
+        from ..rl.online import get_online_manager
+        from ..simulation.reward import compute_proxy_reward
+
+        om = get_online_manager()
+        if not om.enabled:
+            return
+        det = result.detection
+        pol_r, _ = compute_proxy_reward(
+            detected=det.detected, observed_active=det.true_active, retuned=result.retuned
+        )
+        ctx = sim._context()
+        sh_band = om.shadow_decide(ctx)
+        t = min(int(result.time_slot), sim.env.num_time_slots - 1)
+        occ = getattr(sim.env, "occupancy_observed", sim.env.occupancy)
+        sh_active = bool(occ[t, sh_band])
+        sh_r, _ = compute_proxy_reward(
+            detected=sh_active, observed_active=sh_active, retuned=False
+        )
+        if om.observe(int(result.time_slot), pol_r, sh_r) == "revert":
+            from ..alerting.engine import get_alert_store
+            from ..schedulers.registry import create_scheduler
+
+            sim.scheduler = create_scheduler(
+                "priority", sim.env.num_bands, np.random.default_rng(1234), {}
+            )
+            sim.scheduler_name = "priority"
+            st = om.status()
+            audit(
+                "system", "online.guardrail.revert", detail=st.model_dump(),
+                mode=get_mode_manager().mode,
+            )
+            get_alert_store().raise_alert(
+                "online_guardrail", "critical",
+                f"online policy '{om.active_scheduler}' auto-reverted to priority "
+                f"at slot {st.reverted_at_slot} (policy EMA {st.policy_reward_ema} < "
+                f"shadow {st.shadow_reward_ema} - margin {st.margin})",
+            )
+
+    def explain_policy(self) -> dict:
+        with self._lock:
+            sim = self.sim
+            grid = sim.scheduler.policy_attribution(sim._context())
+        if grid is None:
+            return {
+                "scheduler": sim.scheduler_name,
+                "available": False,
+                "detail": "this scheduler exposes no attribution grid",
+            }
+        grid["available"] = True
+        return grid
+
+    # --- sim-to-real ------------------------------------------- #
+    def sim2real_calibrate(self, req) -> dict:
+        from ..sim2real.calibrate import calibrate
+
+        return calibrate(req.recording_id, req.name).model_dump()
+
+    def sim2real_profiles(self) -> dict:
+        from ..sim2real.calibrate import list_profiles
+
+        return {"profiles": [p.model_dump() for p in list_profiles()]}
+
+    def sim2real_gap(self, req) -> dict:
+        from ..sim2real.gap import compute_gap
+
+        return compute_gap(
+            req.recording_id, req.profile_id, req.scheduler, req.steps, req.noise_shift_db
+        ).model_dump()
+
+    # ------------------------------------------------------------------ #
     # Dataset lab
     # ------------------------------------------------------------------ #
     def generate_dataset(self, req: DatasetGenerateRequest) -> dict:
@@ -443,6 +558,7 @@ class SimulationManager:
                 env_instance=store.build_replay_env(dataset_id),
                 protected_bands=get_tasking_state().protected_bands,
                 on_override=self._on_protected_override,
+                on_step_hook=self._online_step,
                 tasking_weights=get_tasking_state().band_weights(
                     self._env_config.num_bands
                 ),
@@ -474,6 +590,7 @@ class SimulationManager:
             env_instance=live_env,
             protected_bands=get_tasking_state().protected_bands,
             on_override=self._on_protected_override,
+                on_step_hook=self._online_step,
             tasking_weights=get_tasking_state().band_weights(live_env.num_bands),
         )
         return self.state()
@@ -700,6 +817,7 @@ class SimulationManager:
                         "reasons": d.reasons,
                         "alternatives": d.alternatives,
                         "explanation": d.explanation,
+                        "counterfactual": d.counterfactual,
                         "reward_breakdown": r.reward_breakdown,
                     }
                 )
@@ -781,6 +899,7 @@ class SimulationManager:
                 "effects": sim.effect_metrics(),
                 "unacked_alerts": self.unacked_alert_count(),
                 "df": self._df_summary_safe(),
+                "online": self.online_status(),
                 "running": not sim.done,
                 "done": sim.done,
                 "time_slot": sim.t,

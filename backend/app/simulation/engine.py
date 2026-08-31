@@ -78,9 +78,11 @@ class Simulation:
         on_override: Callable[[int, int, int], None] | None = None,
         ew_effects: list | None = None,
         tasking_weights: "np.ndarray | None" = None,
+        on_step_hook: "Callable | None" = None,
     ):
         self.env_config = env_config
         self._tasking_weights = tasking_weights
+        self._on_step_hook = on_step_hook
         self.receiver_config = receiver_config
         self.scheduler_name = scheduler_name
         self.scheduler_params = scheduler_params or {}
@@ -291,6 +293,11 @@ class Simulation:
             metrics=self.metrics.snapshot(up_to_t=t),
         )
         self.history.append(result)
+        if self._on_step_hook is not None:
+            try:
+                self._on_step_hook(self, result)
+            except Exception:  # pragma: no cover - hook must never break a step
+                pass
         return result
 
     def _apply_protected_guard(self, decision: ScanDecision, band: int) -> int:

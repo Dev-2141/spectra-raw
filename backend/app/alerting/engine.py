@@ -28,6 +28,16 @@ class AlertStore:
         self._track_bands: dict[str, set[int]] = {}
 
     def reset(self) -> None:
+        """New analysis context: clear rule dedup state, keep raised alerts.
+
+        Track-derived alerts age out at the cap; externally raised alerts
+        (e.g. the online guardrail) must survive a sim swap.
+        """
+        with self._lock:
+            self._fired.clear()
+            self._track_bands.clear()
+
+    def clear_all(self) -> None:
         with self._lock:
             self._alerts.clear()
             self._fired.clear()
@@ -103,6 +113,13 @@ class AlertStore:
                             f"spectrum anomaly on band {b}", None, int(b)))
 
         return new
+
+    def raise_alert(
+        self, rule_kind: str, severity: str, detail: str,
+        track_id: str | None = None, band: int | None = None,
+    ) -> Alert:
+        with self._lock:
+            return self._add(rule_kind, severity, detail, track_id, band)
 
     def list(self, state: str | None = None) -> list[Alert]:
         with self._lock:

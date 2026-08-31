@@ -486,6 +486,80 @@ export interface DFSummary {
   mean_cep_km: number | null;
 }
 
+// --- RL / online learning / sim-to-real / explain++ (Step 6) --------- //
+export interface RLJob {
+  job_id: string;
+  scheduler: string;
+  status: "queued" | "running" | "done" | "failed";
+  created_at: string;
+  updated_at: string;
+  episodes: number;
+  episodes_done: number;
+  curriculum: boolean;
+  stage: string | null;
+  learning_curve: number[];
+  curriculum_stages: Array<{ stage: string; first: number; last: number; mean: number }>;
+  best_avg_reward: number | null;
+  final_avg_reward: number | null;
+  checkpoint: string | null;
+  error: string | null;
+  promoted: boolean;
+}
+
+export interface OnlineStatus {
+  enabled: boolean;
+  active_scheduler: string;
+  shadow_scheduler: string;
+  policy_reward_ema: number;
+  shadow_reward_ema: number;
+  margin: number;
+  window: number;
+  breaches: number;
+  reverted: boolean;
+  reverted_at_slot: number | null;
+  updates: number;
+}
+
+export interface CalibrationProfile {
+  profile_id: string;
+  name: string;
+  recording_id: string;
+  created_at: string;
+  num_bands: number;
+  noise_floor_db: number;
+  emitter_density: number;
+  snr_min_db: number;
+  snr_max_db: number;
+  false_alarm_prob: number;
+  stats: Record<string, number>;
+}
+
+export interface RealityGapReport {
+  recording_id: string;
+  profile_id: string;
+  scheduler: string;
+  steps: number;
+  metrics: Array<{
+    metric: string;
+    recording_value: number;
+    sim_value: number;
+    gap: number;
+  }>;
+  gap_score: number;
+  narrative: string;
+}
+
+export interface PolicyGrid {
+  available: boolean;
+  scheduler?: string;
+  features?: string[];
+  bands?: number[];
+  grid?: number[][];
+  scores?: number[];
+  q_values?: number[];
+  detail?: string;
+}
+
 export interface Metrics {
   steps: number;
   total_reward: number;
@@ -591,6 +665,7 @@ export interface SimState {
   effects?: EffectMetrics;
   unacked_alerts?: number;
   df?: DFSummary;
+  online?: OnlineStatus;
   replay_mode: boolean;
   environment: {
     num_bands: number;
@@ -719,6 +794,11 @@ export interface ExplainRow {
   reasons: string[];
   alternatives: number[];
   explanation: string;
+  counterfactual?: {
+    alt_band: number;
+    flip_factor: string;
+    margin: number;
+  } | null;
   reward_breakdown: Record<string, number>;
 }
 
@@ -899,6 +979,37 @@ export const api = {
       `/api/df/fixes/${encodeURIComponent(trackId)}`,
     ),
   dfHealth: () => jget<DFHealth>("/api/df/health"),
+
+  // --- RL training / online / sim-to-real / explain++ ------------- //
+  rlTrain: (body: {
+    scheduler: string;
+    episodes: number;
+    steps_per_episode: number;
+    curriculum: boolean;
+    scenario_id?: string | null;
+  }) => jpost<RLJob>("/api/rl/train", body),
+  rlJobs: () => jget<{ jobs: RLJob[] }>("/api/rl/jobs"),
+  rlJob: (id: string) => jget<RLJob>(`/api/rl/jobs/${id}`),
+  rlPromote: (id: string) => jpost<RLJob>(`/api/rl/jobs/${id}/promote`),
+
+  onlineEnable: (body: { scheduler: string; margin: number; window: number }) =>
+    jpost<OnlineStatus>("/api/online/enable", body),
+  onlineDisable: () => jpost<OnlineStatus>("/api/online/disable"),
+  onlineStatus: () => jget<OnlineStatus>("/api/online/status"),
+
+  explainPolicy: () => jget<PolicyGrid>("/api/explain/policy"),
+
+  s2rCalibrate: (recording_id: string, name?: string) =>
+    jpost<CalibrationProfile>("/api/sim2real/calibrate", { recording_id, name }),
+  s2rProfiles: () =>
+    jget<{ profiles: CalibrationProfile[] }>("/api/sim2real/profiles"),
+  s2rGap: (body: {
+    recording_id: string;
+    profile_id: string;
+    scheduler: string;
+    steps: number;
+    noise_shift_db: number;
+  }) => jpost<RealityGapReport>("/api/sim2real/gap", body),
 
   schedulers: () =>
     jget<{ schedulers: string[]; learning_schedulers: string[] }>("/api/schedulers"),

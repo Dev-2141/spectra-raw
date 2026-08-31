@@ -75,6 +75,34 @@ def compute_reward(
     return reward, breakdown
 
 
+def compute_proxy_reward(
+    *,
+    detected: bool,
+    observed_active: bool,
+    retuned: bool,
+    rediscovered: bool = False,
+    under_scan_uncertainty: float = 0.0,
+) -> tuple[float, dict]:
+    """Reward with NO ground-truth claim — for online learning on live RF.
+
+    Rewards stable above-threshold detections and rediscovering an active band;
+    penalises empty scans and excess retuning; small uncertainty bonus for
+    probing under-scanned bands.
+    """
+    b: dict[str, float] = {}
+    if detected and observed_active:
+        b["stable_detection"] = 3.0
+        if rediscovered:
+            b["rediscovery"] = 2.0
+    elif not observed_active and not detected:
+        b["empty_scan"] = -2.0
+    if retuned:
+        b["retune_cost"] = -1.0
+    if under_scan_uncertainty > 0.0:
+        b["uncertainty_bonus"] = round(0.5 * float(under_scan_uncertainty), 4)
+    return float(sum(b.values())), b
+
+
 class RewardEngine:
     """OO wrapper around :func:`compute_reward`.
 

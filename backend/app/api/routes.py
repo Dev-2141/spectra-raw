@@ -23,7 +23,12 @@ from ..models.core import (
     StepRequest,
     TrainRequest,
 )
-from ..schedulers.registry import LEARNING_SCHEDULERS, list_schedulers
+from ..schedulers.registry import (
+    LEARNING_SCHEDULERS,
+    available_schedulers,
+    list_schedulers,
+    scheduler_requirements,
+)
 from .manager import get_manager
 
 public_router = APIRouter(prefix="/api", tags=["public"])
@@ -60,6 +65,8 @@ def health() -> dict:
 def schedulers() -> dict:
     return {
         "schedulers": list_schedulers(),
+        "available": available_schedulers(),
+        "requirements": scheduler_requirements(),
         "learning_schedulers": sorted(LEARNING_SCHEDULERS),
     }
 
@@ -81,7 +88,7 @@ def simulation_reset(
 ) -> dict:
     try:
         out = get_manager().reset(req or ResetRequest())
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(
         principal.username,

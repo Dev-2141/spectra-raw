@@ -132,6 +132,18 @@ class PriorityScoreScheduler(BaseScheduler):
         if p_est > 1:
             expl += f", est. period ~{p_est:.0f}"
 
+        self._last_contrib = contrib
+        cf = None
+        if alternatives:
+            alt = alternatives[0]
+            gaps = {k: float(v[band] - v[alt]) for k, v in contrib.items()}
+            flip = max(gaps, key=gaps.get)
+            cf = {
+                "alt_band": int(alt),
+                "flip_factor": flip,
+                "margin": round(float(score[band] - score[alt]), 4),
+            }
+
         return self._decision(
             context=context,
             band=band,
@@ -140,7 +152,25 @@ class PriorityScoreScheduler(BaseScheduler):
             reasons=top,
             alternatives=alternatives,
             explanation=expl,
+            counterfactual=cf,
         )
+
+    def policy_attribution(self, context) -> dict:
+        self.decide(context)  # refresh self._last_contrib
+        contrib = getattr(self, "_last_contrib", {})
+        feats = list(contrib.keys())
+        grid = [[round(float(v), 4) for v in contrib[k]] for k in feats]
+        scores = [
+            round(float(sum(contrib[k][b] for k in feats)), 4)
+            for b in range(self.num_bands)
+        ]
+        return {
+            "scheduler": self.name,
+            "features": feats,
+            "bands": list(range(self.num_bands)),
+            "grid": grid,
+            "scores": scores,
+        }
 
     def update(self, feedback) -> None:
         b = feedback.band
