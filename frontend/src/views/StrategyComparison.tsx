@@ -122,6 +122,8 @@ export default function StrategyComparison() {
             </p>
           </Panel>
 
+          <BeforeAfterPanel report={report} />
+
           <div className="grid grid-cols-2 gap-2">
             <Panel title="Interception ratio">
               <BarChart
@@ -165,6 +167,115 @@ export default function StrategyComparison() {
 
       <MonteCarloPanel schedulers={selected} />
     </div>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Before / After — open-loop sweep vs the best adaptive scheduler
+// --------------------------------------------------------------------------- //
+function BeforeAfterPanel({ report }: { report: ComparisonReport }) {
+  const entryOf = (name: string) =>
+    report.entries.find((e) => e.scheduler === name) ?? null;
+
+  const baseName = entryOf("round_robin")
+    ? "round_robin"
+    : report.ranking[report.ranking.length - 1];
+  const adaptName =
+    report.winner !== baseName
+      ? report.winner
+      : report.ranking.find((n) => n !== baseName) ?? report.winner;
+
+  const base = entryOf(baseName);
+  const adapt = entryOf(adaptName);
+  if (!base || !adapt || baseName === adaptName) {
+    return (
+      <Panel title="Before / after — open-loop vs adaptive">
+        <Empty>
+          include <code>round_robin</code> and at least one adaptive scheduler in
+          the set to see the head-to-head.
+        </Empty>
+      </Panel>
+    );
+  }
+
+  const rows: Array<{
+    label: string;
+    before: number;
+    after: number;
+    fmt: (v: number) => string;
+    betterUp: boolean;
+  }> = [
+    {
+      label: "average reward",
+      before: base.metrics.average_reward,
+      after: adapt.metrics.average_reward,
+      fmt: (v) => v.toFixed(2),
+      betterUp: true,
+    },
+    {
+      label: "interception ratio",
+      before: base.metrics.interception_ratio,
+      after: adapt.metrics.interception_ratio,
+      fmt: (v) => v.toFixed(3),
+      betterUp: true,
+    },
+    {
+      label: "high-priority detection",
+      before: base.metrics.high_priority_detection_rate,
+      after: adapt.metrics.high_priority_detection_rate,
+      fmt: (v) => v.toFixed(3),
+      betterUp: true,
+    },
+    {
+      label: "missed opportunities",
+      before: base.metrics.missed_opportunity_count,
+      after: adapt.metrics.missed_opportunity_count,
+      fmt: (v) => v.toFixed(0),
+      betterUp: false,
+    },
+  ];
+
+  return (
+    <Panel
+      title={`Before / after — ${baseName} (open-loop) vs ${adaptName} (adaptive)`}
+    >
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {rows.map((r) => {
+          const delta = r.after - r.before;
+          const improved = r.betterUp ? delta > 0 : delta < 0;
+          return (
+            <div
+              key={r.label}
+              className="rounded border border-rf-border bg-rf-panel2 p-2"
+            >
+              <div className="text-[9px] uppercase tracking-wider text-rf-dim">
+                {r.label}
+              </div>
+              <div className="mt-1 flex items-baseline gap-2 tabular-nums">
+                <span className="text-[13px] text-rf-dim line-through">
+                  {r.fmt(r.before)}
+                </span>
+                <span className="text-[17px] text-rf-text">{r.fmt(r.after)}</span>
+              </div>
+              <div
+                className={
+                  "text-[10px] tabular-nums " +
+                  (improved ? "text-rf-accent" : "text-rf-alert")
+                }
+              >
+                {delta >= 0 ? "+" : ""}
+                {r.fmt(delta)} {improved ? "▲ better" : "▼ worse"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-[10px] text-rf-dim">
+        Same scenario, same seed ({report.scenario_seed}), {report.steps} steps —
+        the only variable is the policy. A fixed sweep looks at every band in turn;
+        the adaptive scheduler learns from hits, misses, threat and periodicity.
+      </p>
+    </Panel>
   );
 }
 

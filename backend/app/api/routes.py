@@ -12,8 +12,15 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from ..audit.log import audit
 from ..auth.deps import Principal, Role, require_role
 from ..comparison.export import report_to_csv, report_to_html
+from ..evidence import build_evidence_pack
+from ..metrics.split import metric_split
 from ..modes.manager import get_mode_manager
-from ..reporting import run_report_to_csv, run_report_to_html
+from ..reporting import (
+    build_mission_report,
+    mission_report_to_html,
+    run_report_to_csv,
+    run_report_to_html,
+)
 from ..models.core import (
     ComparisonRequest,
     DatasetGenerateRequest,
@@ -320,6 +327,65 @@ def report_run_export(fmt: str) -> Response:
     if fmt == "html":
         return Response(run_report_to_html(report), media_type="text/html")
     raise HTTPException(status_code=400, detail="format must be json, csv, or html")
+
+
+@router.get("/report/metrics/split")
+def report_metrics_split() -> dict:
+    """Canonical simulation-vs-live metric split with per-metric definitions."""
+    return metric_split()
+
+
+@router.get("/report/mission/{session_id}")
+def report_mission(session_id: str, baseline: int = 1) -> dict:
+    try:
+        return build_mission_report(session_id, with_baseline=bool(baseline))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/report/mission/{session_id}/export/{fmt}")
+def report_mission_export(session_id: str, fmt: str) -> Response:
+    try:
+        report = build_mission_report(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if fmt == "json":
+        import json
+
+        return Response(
+            json.dumps(report, indent=2, default=str),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename=mission_{session_id}.json"
+            },
+        )
+    if fmt == "html":
+        return Response(mission_report_to_html(report), media_type="text/html")
+    raise HTTPException(status_code=400, detail="format must be json or html")
+
+
+@router.get("/evidence/{session_id}")
+def evidence_pack(
+    session_id: str, principal: Principal = Depends(_viewer)
+) -> Response:
+    try:
+        blob = build_evidence_pack(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "evidence.export",
+        target=session_id,
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return Response(
+        blob,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=evidence_{session_id}.zip"
+        },
+    )
 
 
 @router.get("/comparison/export/{fmt}")

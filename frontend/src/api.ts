@@ -62,6 +62,31 @@ async function jdelete<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Authenticated file fetch — <a href> can't carry the bearer token, so pull the
+// bytes with fetch() and hand the browser a blob URL instead.
+async function fetchBlob(path: string): Promise<Blob> {
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  await guard(res, path);
+  return res.blob();
+}
+
+export async function downloadAuthed(path: string, filename: string): Promise<void> {
+  const url = URL.createObjectURL(await fetchBlob(path));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+export async function openAuthed(path: string): Promise<void> {
+  const url = URL.createObjectURL(await fetchBlob(path));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 // --------------------------------------------------------------------------- //
 export interface Health {
   status: string;
@@ -831,6 +856,82 @@ export interface RunReport {
   recent_decisions: ExplainRow[];
 }
 
+// --- Step 8: metric split, mission report, evidence pack --------------- //
+export interface MetricDef {
+  name: string;
+  definition: string;
+}
+export interface MetricSplit {
+  simulation: MetricDef[];
+  live: MetricDef[];
+  note: string;
+}
+
+export interface MissionReport {
+  product: string;
+  kind: string;
+  schema_version: number;
+  generated_at: string;
+  session: {
+    session_id: string;
+    name: string;
+    tags: string[];
+    mode: string;
+    scenario: string;
+    scheduler: string;
+    started_at: string;
+    finished_at: string;
+    row_counts: Record<string, number>;
+  };
+  summary: {
+    steps: number;
+    detections: number;
+    false_alarms: number;
+    total_reward: number;
+    average_reward: number;
+  };
+  metrics: {
+    mode_applicability: string;
+    simulation: Array<{ name: string; value: number | string; definition: string }>;
+    live: Array<{ name: string; value: number | string; definition: string }>;
+  };
+  timeline: Array<{
+    time_slot: number;
+    selected_band: number;
+    detected: boolean;
+    false_alarm: boolean;
+    reward: number;
+  }>;
+  reward_series: number[];
+  scheduler_vs_baseline: {
+    scenario: string;
+    seeds: number[];
+    steps: number;
+    winner: string;
+    rows: Array<{
+      scheduler: string;
+      average_reward: { mean: number; ci95: number };
+      interception_ratio: { mean: number; ci95: number };
+      high_priority_detection_rate: { mean: number; ci95: number };
+    }>;
+    adaptive_minus_baseline: {
+      average_reward: number;
+      interception_ratio: number;
+      high_priority_detection_rate: number;
+    } | null;
+  } | null;
+  tracks: Array<Record<string, unknown>>;
+  df_fixes: { fixes: Array<Record<string, unknown>>; mean_cep_km: number | null; n: number };
+  alerts: {
+    total: number;
+    by_state: Record<string, number>;
+    by_severity: Record<string, number>;
+    items: Array<Record<string, unknown>>;
+  };
+  assumptions: string[];
+  limitations: string[];
+}
+
 export interface ResetBody {
   preset?: string;
   environment?: Partial<EnvironmentConfig>;
@@ -1093,6 +1194,17 @@ export const api = {
   runReport: () => jget<RunReport>("/api/report/run"),
   runReportExportUrl: (fmt: "json" | "csv" | "html") =>
     `${BASE}/api/report/run/export/${fmt}`,
+
+  // --- Step 8: metric split / mission report / evidence pack ---------- //
+  metricsSplit: () => jget<MetricSplit>("/api/report/metrics/split"),
+  missionReport: (sessionId: string, baseline = true) =>
+    jget<MissionReport>(
+      `/api/report/mission/${encodeURIComponent(sessionId)}?baseline=${baseline ? 1 : 0}`,
+    ),
+  missionReportExportUrl: (sessionId: string, fmt: "json" | "html") =>
+    `${BASE}/api/report/mission/${encodeURIComponent(sessionId)}/export/${fmt}`,
+  evidencePackUrl: (sessionId: string) =>
+    `${BASE}/api/evidence/${encodeURIComponent(sessionId)}`,
 };
 
 export const ALL_SCHEDULERS = [

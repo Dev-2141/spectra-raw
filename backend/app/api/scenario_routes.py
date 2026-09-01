@@ -102,6 +102,10 @@ def load_scenario(scenario_id: str, principal: Principal = Depends(_viewer)) -> 
         out = get_manager().load_scenario(scenario_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # e.g. the currently-selected scheduler is unavailable (torch missing).
+        # Degrade cleanly with a 400 instead of a 500; the sim path is untouched.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(principal.username, "scenario.load", target=scenario_id,
           mode=_mode(), role=principal.role_name)
     return out

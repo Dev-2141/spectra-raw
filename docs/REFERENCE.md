@@ -228,6 +228,58 @@ another, and every denominator is a *fair-chance* count:
 - **Correct prediction %** = correct activity predictions / predictions made.
   Rewards a scheduler that *models* the spectrum, not just reacts.
 
+## I.9a Metric split — simulation vs live (`app/metrics/split.py`)
+
+The metrics above assume synthetic **ground truth** (`occupancy_truth`,
+`env.events`, per-band threat). With a receive-only SDR feed there is no ground
+truth, so Step 8 freezes an explicit split. `SIM_METRICS` and `LIVE_METRICS` in
+`app/metrics/split.py` are the authoritative lists; `GET /api/report/metrics/split`
+serves them with one-line definitions, and every mission report groups its
+numbers under the two headings.
+
+**Simulation metrics (need ground truth):** `probability_of_detection`,
+`false_alarm_rate`, `interception_ratio`, `average_intercept_delay`,
+`high_priority_detection_rate`, `missed_opportunity_count`,
+`correct_prediction_percentage`, `detection_under_effect_rate`,
+`spoof_deception_rate`, `df_cep_km`, `df_rmse_km`. In `live_es` mode these read
+`n/a`.
+
+**Live metrics (no ground truth):** `occupancy_estimate` (share of scans flagged
+above threshold), `scan_coverage`, `average_observed_snr_db`,
+`average_revisit_time`, `above_threshold_detections`, `average_proxy_reward`
+(mean of `compute_proxy_reward()` — rewards stable above-threshold detections,
+penalises empty scans and excess retuning, **claims no truth**),
+`recording_duration_s`, `frame_rate_hz`, `alerts_open`, `alerts_total`,
+`policy_vs_shadow_margin`.
+
+Each metric has an **independent reimplementation** in `split.py`
+(`recompute_sim_metrics`, `recompute_live_metrics`) that rebuilds it from the raw
+per-step history with no shared state; `test_ext_step8.py` asserts it equals the
+live `MetricsTracker` snapshot (cross-cutting requirement #4). `scan_coverage`
+and `average_revisit_time` appear in both lists with the same definition.
+
+## I.9b Validation surface (Step 8)
+
+- **`scripts/benchmark.py`** — a frozen matrix (3 presets × 3 schedulers × 3
+  seeds × 400 steps). `run_benchmark()` returns per-metric mean / std / 95 % CI
+  and cross-preset headline means; `check_bands()` compares the headlines to
+  `HEADLINE_BANDS`. `test_ext_step8_benchmark.py` is the CI gate: it fails on a
+  band violation, on non-determinism, or if `priority` stops beating
+  `round_robin` on any preset.
+- **`scripts/ablation.py`** — every available scheduler vs the `round_robin` /
+  `random` baselines across every preset, mean ± 95 % CI, plus the
+  average-reward delta against each baseline. Feeds `docs/VALIDATION.md` and the
+  mission-report baseline table.
+- **Mission report** (`app/reporting.py::build_mission_report`) — per persisted
+  session: summary, the metric split above, a scheduler-vs-baseline table with
+  mean ± CI (the scenario is reconstructed from session metadata and re-run),
+  sampled timeline, tracks, DF fixes, alerts, hand-built SVG charts, assumptions
+  and limitations. HTML is self-contained (no external asset references).
+- **Evidence pack** (`app/evidence.py::build_evidence_pack`) — a `.zip` of the
+  raw session files, the mission report (HTML + JSON), a fresh benchmark JSON,
+  `DATA_SCHEMA.md`, and a `manifest.json` with a SHA-256 per entry.
+  `verify_evidence_pack()` re-hashes every file.
+
 ## I.10 Strategy comparison & weighted scoring
 
 To compare schedulers fairly, each is run in its **own simulation seeded
@@ -541,6 +593,22 @@ count), `receiver` summary, the full `emitters` and `bands` lists, `spectrum`
 Thin handlers: validate the body, call the manager, translate `KeyError`/
 `ValueError`/`RuntimeError` into `400`/`404`/`409`. Full list in Part IV.
 
+## II.15 Step 8 backend additions
+
+Theory and metric formulas are in §I.9a / §I.9b. Modules:
+
+| Symbol | Purpose |
+| --- | --- |
+| `app/metrics/split.py` — `SIM_METRICS`, `LIVE_METRICS` | Frozen dicts `name -> definition` for the simulation-vs-live split. `scan_coverage` and `average_revisit_time` appear in both. |
+| `app/metrics/split.py` — `metric_split()` | Serialisable split for `GET /api/report/metrics/split`. |
+| `app/metrics/split.py` — `recompute_sim_metrics(history, env)` / `recompute_live_metrics(history)` | Independent reimplementations that rebuild each metric from the raw per-step history with no shared state; `test_ext_step8.py` asserts equality with the `MetricsTracker` snapshot. |
+| `app/reporting.py` — `build_mission_report(session_id, with_baseline=True)` | Assembles the mission-report dict from a persisted session: summary, metric split, `_baseline_table()` (round_robin vs the session scheduler, mean ± CI via a scenario re-run), sampled timeline, tracks, DF fixes, alerts, assumptions, limitations. |
+| `app/reporting.py` — `mission_report_to_html(report)`, `_svg_line()`, `_svg_bars()` | Self-contained HTML (inline `<style>`, hand-built SVG). No external asset references. |
+| `app/evidence.py` — `build_evidence_pack(session_id)` / `verify_evidence_pack(blob)` | `.zip` of raw session + mission report (HTML+JSON) + fresh benchmark JSON + `DATA_SCHEMA.md` + `manifest.json` (SHA-256 per file); verifier re-hashes every entry. |
+| `scripts/benchmark.py` — `run_benchmark()`, `check_bands()`, `HEADLINE_BANDS` | Frozen 3×3×3 matrix; per-metric mean/std/95 % CI + cross-preset headline means; the CI gate (`test_ext_step8_benchmark.py`). `--emit-bands` regenerates the tolerance dict. |
+| `scripts/ablation.py` — `run_ablation()` | Every available scheduler vs `round_robin` / `random` across every preset, mean ± 95 % CI, avg-reward deltas. |
+| `app/api/manager.py` — `SimulationManager.session_finish()` | Now also snapshots the final tracks / alerts / DF fixes into the session so the mission report is populated. |
+
 ---
 
 # Part III — Frontend reference
@@ -633,7 +701,23 @@ scenario, `t / max`, scheduler, replay flag, busy/playing, the safety string).
 | `DatasetLab.tsx` | Left: a generate form (name, bands, slots, density, seed) → `api.datasetGenerate`, and the dataset list. Right: for the selected dataset, stat tiles, the emitter-type mix as badges, a **preview heatmap** (`Waterfall` fed by `api.datasetPreview`), and **load into simulation** (`api.datasetLoad` → replay mode). `Kv` is a small key/value tile. |
 | `TrainingRuns.tsx` | A train form (learner, episodes, steps/episode) → `api.train`; a run-history list; and for the selected run, roll-up badges, the per-episode `LineChart` (avg reward + P(det)×10), and the full episode table (seed, avg R, P(det), interception, hi-pri, missed, epsilon, Q-states, Q-updates), best episode highlighted. |
 | `ExplainabilityLog.tsx` | Auto-refreshing (1.5 s) table of every decision from `api.explainabilityLog` with an outcome filter (all/hit/miss/false_alarm/empty). Each row: t, scheduler, band, confidence, prediction, outcome tag, reward, explanation + reason chips + alternatives. |
-| `Reports.tsx` | The current **run report** (`api.runReport`) as a badge strip + metric grid + recent-decisions table with CSV/JSON/HTML export, and the **last strategy comparison** (`api.comparisonLast`) as a compact ranked table with its own export links. |
+| `Reports.tsx` | The current **run report** (`api.runReport`) as a badge strip + metric grid + recent-decisions table with CSV/JSON/HTML export, and the **last strategy comparison** (`api.comparisonLast`) as a compact ranked table with its own export links. Step 8 adds the mission-report / evidence-pack panel and the metric-definitions panel (§III.9). |
+
+> Steps 1–7 also added `HardwareLab`, `ScenarioEditor`, `SignalsTracks`,
+> `Geolocation`, `Library`, `TaskingAlerts`, `Sessions`, `Sim2Real`,
+> `TrainingRuns` and `Admin` views, plus the login screen and the header
+> mode-switch / safety chip. Each follows the same one-file-per-tab pattern.
+
+## III.9 Step 8 frontend additions
+
+| Symbol | Purpose |
+| --- | --- |
+| `views/BriefMode.tsx` | Full-screen, keyboard-driven walk-through (toggle with `b` from any view, or the header **▶ Brief** button). A 13-slide deck mirroring `docs/DEMO.md`: title, the problem, open-loop baseline (auto-resets to `round_robin` + plays), adaptive (`priority`), explainability, a **before/after** panel (runs `round_robin` vs `priority` once and shows three headline deltas), Monte Carlo, simulated jamming, tracks/library/tasking, hardware lab + geolocation, sim-to-real, mission report, takeaway. `←`/`→`/space move, `p` play/pause, `Esc` exits. Reuses `SpectrumChart` / `Waterfall` driven by `useSim` state. |
+| `views/StrategyComparison.tsx` — `BeforeAfterPanel` | Open-loop (`round_robin`) vs the best adaptive scheduler in the report: average reward, interception ratio, high-priority detection, missed opportunities — each as before → after with a coloured delta. |
+| `views/Reports.tsx` — `MissionReportPanel` | Session picker → `api.missionReport(id)` → summary tiles, the scheduler-vs-baseline CI table, and the sim/live metric split; `↗ html` / `↓ json` / `↓ evidence .zip` via the authed blob helpers. |
+| `views/Reports.tsx` — `MetricDefsPanel` | `api.metricsSplit()` rendered as two definition lists (simulation vs live). |
+| `api.ts` — `metricsSplit`, `missionReport`, `missionReportExportUrl`, `evidencePackUrl` | Step 8 endpoints; types `MetricSplit`, `MetricDef`, `MissionReport`. |
+| `api.ts` — `downloadAuthed(path, filename)` / `openAuthed(path)` | Fetch a file **with the bearer header** (an `<a href>` can't carry it) and hand the browser a blob URL — used for the mission report HTML/JSON and the evidence `.zip`. |
 
 ---
 

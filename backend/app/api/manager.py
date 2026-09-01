@@ -754,7 +754,36 @@ class SimulationManager:
     def session_finish(self) -> dict:
         from ..store.sessions import get_session_store
 
-        return get_session_store().finish()
+        store = get_session_store()
+        # Capture a final analysis / DF / alert snapshot so the mission report
+        # has tracks, fixes and alerts even though only decisions + metrics are
+        # streamed per step. Best-effort: never let this break finish().
+        if store.active_id:
+            try:
+                snap = self._analysis_snapshot()
+                t = snap.get("t")
+                if snap.get("tracks"):
+                    store.record(
+                        "tracks", [{**tr, "time_slot": t} for tr in snap["tracks"]]
+                    )
+                from ..alerting.engine import get_alert_store
+
+                alist = [a.model_dump() for a in get_alert_store().list()]
+                if alist:
+                    store.record("alerts", [{**a, "time_slot": t} for a in alist])
+            except Exception:  # pragma: no cover - snapshot is optional
+                pass
+            try:
+                fixes = self._df_snapshot().get("fixes", [])
+                if fixes:
+                    store.record(
+                        "df_fixes",
+                        [{**f, "time_slot": self._df_snapshot().get("t")} for f in fixes],
+                    )
+            except Exception:  # pragma: no cover
+                pass
+
+        return store.finish()
 
     def session_list(self) -> list[dict]:
         from ..store.sessions import get_session_store

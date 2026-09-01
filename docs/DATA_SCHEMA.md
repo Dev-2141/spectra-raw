@@ -1,6 +1,6 @@
 # SPECTRA-SCAN AI — Data Schema
 
-`schema_version` on every persisted record. Current: **1**.
+**Finalised (Step 8).** `schema_version` on every persisted record. Current: **1**.
 
 Sessions are stored under `<data_dir>/sessions/<session_id>/`:
 
@@ -86,6 +86,30 @@ method, solvable, schema_version`. `true_*` / `error_km` are present only for
 | `scenarios/<id>.json` | JSON | `Scenario` documents |
 | `sim2real/<id>.json` | JSON | `CalibrationProfile` documents |
 | `rl/<job_id>/checkpoint.json` \| `.pt` | JSON / torch | trained scheduler state |
+
+## Mission report & evidence pack (Step 8, not versioned rows)
+
+`GET /api/report/mission/{session_id}` returns a JSON document
+(`kind: "mission_report"`, `schema_version` copied from the session) with:
+`session`, `summary`, `metrics` (`{mode_applicability, simulation[], live[]}` —
+each entry `{name, value, definition}`), `timeline[]`, `reward_series[]`,
+`scheduler_vs_baseline` (`{scenario, seeds[], steps, winner, rows[], adaptive_minus_baseline}`
+or `null`), `tracks[]`, `df_fixes {fixes[], mean_cep_km, n}`,
+`alerts {total, by_state, by_severity, items[]}`, `assumptions[]`,
+`limitations[]`. `/export/html` renders the same content as a self-contained HTML
+page (inline `<style>`, hand-built SVG, **no external asset references**).
+
+`GET /api/evidence/{session_id}` → a `.zip`:
+
+| entry | contents |
+| --- | --- |
+| `session/<files>` | the raw session files (`meta.json` + `<kind>.parquet`/`.jsonl.gz`) |
+| `mission_report.html` / `.json` | the report above |
+| `benchmark.json` | a fresh `scripts.benchmark.run_benchmark()` (2 seeds, 200 steps) |
+| `DATA_SCHEMA.md` | this document |
+| `manifest.json` | `{kind, session_id, schema_version, generated_at, files: {name: {bytes, sha256}}}` |
+
+`verify_evidence_pack(blob)` re-hashes every listed file against the manifest.
 
 ## Versioning / migration
 

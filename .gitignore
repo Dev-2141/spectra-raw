@@ -13,6 +13,9 @@ backend/data/recordings/
 backend/data/scenarios/
 backend/data/rl/
 backend/data/sim2real/
+backend/data/sessions/
+backend/data/benchmark/
+backend/data/ablation/
 !backend/data/.gitkeep
 
 # Trained-on-first-use classifier cache (not a source artifact)

@@ -5,6 +5,7 @@ import ControlSidebar from "./ControlSidebar";
 import { LoadingBar } from "./ui";
 import { useSim } from "./useSim";
 import Admin from "./views/Admin";
+import BriefMode from "./views/BriefMode";
 import DatasetLab from "./views/DatasetLab";
 import ExplainabilityLog from "./views/ExplainabilityLog";
 import Geolocation from "./views/Geolocation";
@@ -56,7 +57,20 @@ export default function App() {
   const [mode, setMode] = useState<PlatformMode | null>(null);
   const [switching, setSwitching] = useState(false);
   const [hwSource, setHwSource] = useState<string | null>(null);
+  const [brief, setBrief] = useState(false);
   const s = sim.state;
+
+  // `b` from any view toggles Brief Mode (ignored while typing in a field).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "b" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName)) return;
+      setBrief((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const isAdmin = hasRole("admin");
   const canSwitchMode = hasRole("operator");
@@ -153,6 +167,15 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-2 text-[10px]">
+          {/* brief mode */}
+          <button
+            onClick={() => setBrief(true)}
+            title="full-screen walk-through (press b)"
+            className="rounded border border-rf-border px-1.5 py-0.5 text-rf-dim hover:border-rf-accent hover:text-rf-accent"
+          >
+            ▶ Brief
+          </button>
+
           {/* mode switch */}
           <div className="flex overflow-hidden rounded border border-rf-border">
             {(["simulation", "live_es"] as const).map((m) => (
@@ -289,6 +312,8 @@ export default function App() {
           {live ? "  ·  live-es / receive-only" : "  ·  simulation-only / receive-only"}
         </span>
       </footer>
+
+      {brief && <BriefMode sim={sim} onExit={() => setBrief(false)} />}
     </div>
   );
 }
