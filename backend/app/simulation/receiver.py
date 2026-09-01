@@ -54,6 +54,12 @@ class Receiver:
         hi = min(env.num_bands - 1, lo + cfg.scan_window - 1)
         window = range(lo, hi + 1)
 
+        # The receiver observes the *observed* spectrum: on a plain env this is
+        # the ground truth; under simulated EW effects it is the jammed/spoofed
+        # view. Effect-free callers see identical behaviour.
+        occ_obs = getattr(env, "occupancy_observed", None)
+        snr_obs = getattr(env, "snr_observed", None)
+
         best = {
             "band": band,
             "true_active": False,
@@ -61,8 +67,9 @@ class Receiver:
             "threat": 0.0,
         }
         for b in window:
-            if env.is_active(t, b):
-                snr = env.snr_at(t, b)
+            active_b = bool(occ_obs[t, b]) if occ_obs is not None else env.is_active(t, b)
+            if active_b:
+                snr = float(snr_obs[t, b]) if snr_obs is not None else env.snr_at(t, b)
                 if not best["true_active"] or snr > best["true_snr_db"]:
                     best = {
                         "band": b,

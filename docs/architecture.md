@@ -1,120 +1,172 @@
 # SPECTRA-SCAN AI — Architecture Notes
 
+Dual-mode: **simulation** (seeded synthetic ground truth) and **live_es**
+(receive-only SDR / recording). Both drive the identical dashboard; the metric
+set differs (see [`VALIDATION.md`](VALIDATION.md)).
+
 ## Design goals
 
-1. **Deterministic, reproducible scenarios.** Given a seed, the entire ground
-   truth (occupancy / SNR / power / threat matrices and the emitter list) is
-   fixed. Schedulers and the receiver use *separate* RNG streams so scheduler
-   randomness never perturbs the world — this makes strategy comparison fair
-   (Step 3).
-2. **Strict information boundary.** A scheduler receives a `SchedulerContext`
-   containing only what a real receive-only sensor could know: its own visit /
-   hit / miss / false-alarm counts, last-visit slots, a running activity
-   estimate, static library-style threat priors, and recent reward. It never
-   sees `env.occupancy`.
-3. **Non-hardware.** No SDR, no RF I/O, no transmission path anywhere.
+1. **Deterministic, reproducible scenarios.** Given a seed, the entire
+   simulation ground truth (occupancy / SNR / power / threat matrices, emitter
+   list, propagation, node geometry) is fixed. Schedulers and the receiver use
+   *separate* RNG streams. Strategy comparison, Monte Carlo and the benchmark are
+   bit-reproducible for a given seed set.
+2. **Strict information boundary.** A scheduler sees a `SchedulerContext` with
+   only what a real receive-only sensor could know: its own visit / hit / miss /
+   false-alarm counts, last-visit slots, a running activity estimate, static
+   library-style threat priors, tasking weights, forecast hints, recent reward.
+   It never sees `env.occupancy`.
+3. **Receive-only hardware.** No SDR TX path anywhere; `HardwareAdapter` exposes
+   no transmit method; `/api/health` → `transmit_capability: false`.
+4. **Simulation-only EW effects.** `app/simulation/ew_effects.py` cannot import
+   `app/hardware` (enforced by `test_ext_step3.py`).
+5. **Air-gapped.** No outbound socket during a full smoke run
+   (`scripts/preflight.py`).
+
+## Request pipeline (`app/main.py`)
+
+```
+HTTP -> CORS
+     -> platform_middleware:
+          /api/v1/<x>            rewritten to /api/<x>        (frozen v1 alias)
+          per-IP sliding-window rate limit (SPECTRA_RATE_LIMIT_RPM; testclient exempt)
+          security headers: X-Content-Type-Options nosniff, X-Frame-Options DENY,
+                            Referrer-Policy no-referrer, CSP default-src 'self'
+     -> router (viewer role at the router level; mutations also audit)
+```
+
+In production (`SPECTRA_SERVE_FRONTEND=1`) the built frontend is served as static
+files from the backend — no separate web server, no CDN.
 
 ## Data flow per `Simulation.step()`
 
 ```
-scheduler.decide(context)  ->  ScanDecision
-        |
-receiver.tune(band)        ->  retune flag + cooldown
-receiver.observe(env,t,b)  ->  measurement (true_active, detected, false_alarm, SNR)
-        |
-compute_reward(...)        ->  scalar reward + breakdown
-        |
-update running estimates (visit/hit/miss/FA counts, predicted_activity)
+[live_es only] env.ingest_step(t): pull newest DSP BandObservations into slot t
+scheduler.decide(context)         -> ScanDecision (+ reasons, alternatives, counterfactual)
+_apply_protected_guard(...)       -> redirect off a never-scan band (audited)
+receiver.tune(band)               -> retune flag + cooldown
+receiver.observe(env, t, band)    -> measurement (true_active, detected, false_alarm, SNR, power)
+[effects] score vs occupancy_truth; a "detection" on synthetic energy = deception
+compute_reward(...)               -> scalar reward + per-component breakdown
+update running estimates (visit/hit/miss/FA counts, predicted_activity EWMA)
 scheduler.update(feedback)
-metrics.record(...)        ->  SchedulerMetrics snapshot
-        |
-t += dwell_slots
+metrics.record(...)               -> SchedulerMetrics snapshot (up_to_t)
+on_step_hook(sim, result)         -> online-learning guardrail (live), if enabled
+t += max(1, dwell_slots)
+_publish_and_record(state, results):
+   stream hub  <- "state" event
+   session store <- decisions[] + metrics row   (when a session is recording)
 ```
 
-## Emitter behaviors
+## Live-ES path
 
-| Behavior   | Shape |
-| ---------- | ----- |
-| `constant` | Long on-blocks covering most of the timeline |
-| `burst`    | Short random bursts (1–4 slots) with 6–33 slot gaps |
-| `periodic` | Fixed period (9–40), pulse 1–3, random phase — radar-like |
-| `hopping`  | Parks on a band for a few slots, then steps ±4 bands |
-| `low_duty` | 1–4% duty, 1–2 slot emissions scattered in time |
-| `priority` | 3–8% duty intermittent, threat 0.75–1.0 (high value) |
+- `app/hardware/` adapters produce `SweepFrame`s; `HardwareManager` owns the
+  active adapter, a bounded frame ring buffer and a background reader thread.
+- `app/dsp/process.py` turns frames into `list[BandObservation]`: rolling-
+  percentile noise floor, CFAR-style per-bin occupancy, bin→band aggregation
+  onto the configured grid, per-band SNR, multi-frame exponential smoothing, hop
+  detection between frames.
+- `app/simulation/live_env.py::LiveRFEnvironment` implements the surface
+  `Simulation` expects from `RFEnvironment`, sourced from `HardwareManager` +
+  `dsp`. Ground-truth-only metrics report `n/a`.
 
-## Metrics definitions (Step 1 baseline; refined in Step 5)
+## Streaming (`app/stream/hub.py`, Step 7)
 
-- **Probability of detection** = hits / scans that landed on a truly active band
-- **False alarm rate** = false alarms / inactive scans
-- **Interception ratio** = detected emitter events / emitter events started so far
-- **Average intercept delay** = mean(`first_detection_slot - event_start`) over detected events
-- **Scan coverage** = unique scanned bands / total bands
-- **Average revisit time** = mean gap between consecutive visits to the same band
-- **Missed opportunity count** = Σ over slots of (active bands that slot not equal to the scanned band)
-- **Correct prediction %** = correct activity predictions / predictions made
-  (baselines make no prediction, so this stays 0 until Step 2)
+- `StreamHub` fan-out with a per-subscriber bounded queue and a monotonic
+  per-type sequence number.
+- Events: `state`, `decision`, `metric`, `alert`. Backpressure drops the oldest
+  `state`/`metric` for a slow subscriber; **`alert` is never dropped**.
+- `WS /ws?token=<jwt>`: authenticated at connect. The frontend `useSim` hook
+  opens it for server-push refresh with a 2.5 s reconnect and **REST polling as
+  the fallback**; the header shows `live ⇅ / polling / offline`. Vite proxies
+  `/ws` in dev.
 
-## Dataset lab & replay (Step 3)
+## Storage & sessions (`app/store/sessions.py`, Step 7)
 
-- `app/dataset/generator.py` wraps the same seeded `RFEnvironment` and extracts
-  `occupancy / power_db / snr_db / threat / labels / emitter_id` matrices plus a
-  `DatasetMeta` sidecar (stats, emitter list, integer label codes).
-- `app/dataset/store.py` persists each dataset to
-  `backend/data/datasets/<id>/` — `meta.json` + `*.npy` (canonical) + `*.csv`
-  mirrors — and rehydrates it via `RFEnvironment(config, prebuilt=...)`
-  (`env.replayed == True`), a drop-in for the live generator.
-- The `SimulationManager` tracks a `_dataset_id`; while set, every `reset` /
-  `run` rebuilds the replay env so the loaded dataset stays active until an
-  explicit `environment` config is posted.
+- `SessionStore.start()` → per-step `record("decisions"|"metrics", rows)` →
+  `finish()` flushes to `data/sessions/<id>/`:
+  - `<kind>.parquet` when `pyarrow` is present, else `<kind>.jsonl.gz`
+  - `meta.json` (mode, scenario, scheduler, timestamps, row counts, format)
+  - a row in the SQLite `sessions` index
+- `finish()` also snapshots the final **tracks / alerts / DF fixes** so a mission
+  report is populated even though only decisions+metrics stream per step.
+- `schema_version = 1` on **every** row. `GET /api/sessions[/{id}[/data/{kind}]]`;
+  `/{id}/export` → a signed `.zip` (Parquet/JSONL + `manifest.json` per-file
+  SHA-256 + `DATA_SCHEMA.md`). `POST /api/sessions/import` verifies every
+  checksum and rejects a `schema_version` or zip mismatch.
+- See [`DATA_SCHEMA.md`](DATA_SCHEMA.md).
 
-## Strategy comparison (Step 3)
+## Direction finding (`app/df/`, Step 5)
 
-- `app/comparison/engine.py` runs each requested scheduler in its own
-  `Simulation` seeded identically (or from the same replayed dataset), so the
-  ground truth is byte-identical across strategies.
-- Per-step `SchedulerMetrics` snapshots (already in `sim.history`) are
-  down-sampled into reward / detection-rate / interception / coverage series.
-- Winner = weighted score over min-max-normalised metrics:
-  `0.35·interception + 0.25·hi-priority + 0.20·avg-reward +
-  0.10·(1−missed) + 0.10·(1−delay)`.
-- `app/comparison/export.py` renders the cached report as CSV or a standalone
-  dark-themed HTML table.
+- `nodes.py` — `ReceiverNode` registry. Simulation: nodes placed in the
+  `Scenario`. Live: a node registers via `POST /api/df/register` (LAN, shared
+  key) and pushes per-band bearing/TDOA observations.
+- `solvers.py` — TDOA multilateration (least-squares + grid refine) and AOA
+  bearing intersection → position + covariance → 95 % error ellipse; AOA and
+  TDOA can be mixed.
+- `sync.py` — GPSDO/PTP sync quality per node degrades the ellipse.
+- `fusion.py` — combine a track's per-node observations over time
+  (recursive least-squares / EKF) → position history.
+- Simulation computes true TOA/AOA per node from geometry + propagation, adds the
+  configured noise, and feeds the **same fusion code** as live. Metrics: CEP /
+  RMSE vs truth (sim), ellipse area, node-contribution count.
 
-## Dashboard (Step 4)
+## RL, online learning, sim-to-real (`app/rl/`, `app/sim2real/`, Step 6)
 
-- `src/useSim.ts` — single `useSim()` hook owns live `SimState`, the play/pause
-  loop (HTTP `step` on an interval, N steps/tick from a speed slider), and the
-  `reset / step / run` controls. All views read from it.
-- `src/ControlSidebar.tsx` — persistent left panel: transport, speed, scheduler,
-  environment + receiver config fields, scenario presets, `apply & reset`.
-- `src/charts.tsx` — dependency-free responsive charts: `SpectrumChart` (SVG
-  bars), `Waterfall` (canvas heatmap + scan-path overlay), `LineChart`
-  (multi-series, HTML y-axis labels + `vectorEffect="non-scaling-stroke"` so a
-  stretched viewBox keeps crisp text and 1px lines), `BarChart`, `Sparkline`.
-- `src/views/*` — one file per tab. Live Monitor is the `[center | right] /
-  [log | reward]` grid; the others are full-width.
-- Backend additions: `GET /api/explainability/log` (decision log from
-  `sim.history`), `GET /api/training/{runs,last}` (manager keeps the last 25
-  `TrainingReport`s), `GET /api/report/run[/export/{fmt}]`,
-  `GET /api/dataset/{id}/preview` (block-reduced occupancy/power grid for the
-  Dataset Lab thumbnail).
+- `rl/envs.py` — Gym-style, vectorisable, seeded wrapper over `Simulation`.
+- `rl/train.py` — async training jobs (`POST /api/rl/train`), replay buffer,
+  target net, checkpoints to `data/rl/`, learning curves. `rl/curriculum.py`
+  trains across presets in increasing difficulty.
+- `rl/online.py` — in `live_es`, a trained policy may update from the
+  **proxy reward** (stable-detection +, rediscovery +, empty-scan −,
+  excess-retune −, uncertainty bonus). Guardrail: run `priority` as a **shadow**
+  baseline; if the online policy's rolling proxy reward drops below the shadow by
+  a margin for a window, auto-revert to `priority` and raise a `critical` alert.
+  All transitions audited.
+- `sim2real/calibrate.py` — fit the sim's noise floor / fading / false-alarm
+  parameters to a recording → a `CalibrationProfile`. `sim2real/gap.py` — run the
+  same scheduler on the recording (replay) and on the calibrated sim → a
+  **reality-gap score** per metric (distribution distance) + a short narrative.
+- Explainability++: every decision payload also carries a `counterfactual`
+  (next-best band + the single factor that would flip the choice);
+  `GET /api/explain/policy` returns a band×feature attribution grid (and a
+  Q-value-per-band vector for DQN).
 
-## Scenario presets (Step 5)
+## Metrics & validation (Step 8)
 
-- `app/simulation/presets.py` holds six named scenarios, each a
-  `(RFEnvironmentConfig, ReceiverConfig)` pair plus a code-level description.
-  `RFEnvironmentConfig.behavior_weights` lets a preset skew the emitter mix
-  (e.g. hopping-heavy, periodic-heavy) without new generator code.
-- `GET /api/presets` lists them; `POST /api/simulation/reset {"preset": name}`
-  and `POST /api/dataset/generate {"preset": name}` apply one. The
-  `SimulationManager` tracks `_preset_name`; an explicit `environment` in a
-  reset clears it. Presets exit dataset-replay mode.
-- The comparison `SCORE_WEIGHTS` were rebalanced so `average_reward` (the RL
-  objective) carries the most weight; `priority` now wins 5 / 6 presets and
-  every smart scheduler beats the best baseline on reward across all six.
+- `app/metrics/tracker.py` — incremental `SchedulerMetrics`.
+- `app/metrics/split.py` — the frozen `SIM_METRICS` / `LIVE_METRICS` split with
+  per-metric definitions, plus `recompute_sim_metrics` / `recompute_live_metrics`
+  that rebuild every metric from the raw per-step history with no shared state
+  (`test_ext_step8.py` asserts equality with the live snapshot).
+- `app/reporting.py` — `build_mission_report(session_id)` +
+  `mission_report_to_html` (self-contained, hand-built SVG line/bar charts).
+- `app/evidence.py` — `build_evidence_pack(session_id)` → `.zip` +
+  `verify_evidence_pack`.
+- `scripts/benchmark.py` — frozen matrix, `HEADLINE_BANDS`, `check_bands`;
+  `test_ext_step8_benchmark.py` is the CI gate.
+- `scripts/ablation.py` — every scheduler vs the two baselines across every
+  preset, mean ± 95 % CI.
 
-## Build complete
+## Frontend
 
-All five steps are done. Future work would target the limitations in
-`README.md` §12 (richer emitter physics, function-approx Q-learning, streaming
-telemetry).
+- `src/useSim.ts` — one hook owns live `SimState`, the `/ws` connection (+
+  polling fallback + play loop), and the `reset / step / run` controls. All views
+  read from it.
+- `src/api.ts` — typed client. `<a href>` can't carry the bearer token, so
+  `downloadAuthed()` / `openAuthed()` fetch the bytes with the auth header and
+  hand the browser a blob URL (used for the mission report / evidence pack).
+- `src/charts.tsx` — dependency-free responsive charts. `LineChart` uses HTML
+  y-axis labels + `vectorEffect="non-scaling-stroke"` so a stretched viewBox
+  keeps crisp text and 1 px lines.
+- `src/views/*` — one file per tab. `BriefMode.tsx` is a full-screen,
+  keyboard-driven walk-through (toggle with `b`) that mirrors [`DEMO.md`](DEMO.md).
+
+## Packaging (Step 7)
+
+- `Dockerfile` — multi-stage, single image (frontend build → static, backend).
+- `docker-compose.yml` — internal network, **no egress**.
+- `deploy/spectra.service` — systemd unit with `IPAddressDeny=any`.
+- `scripts/install_offline.{sh,ps1}` — one-shot offline install.
+- `scripts/preflight.py` — monkeypatches `socket.connect`, runs a full smoke,
+  asserts zero outbound connections.

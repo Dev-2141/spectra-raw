@@ -33,6 +33,10 @@ class BaseScheduler(ABC):
     def reset(self) -> None:
         """Clear any learned state."""
 
+    def policy_attribution(self, context) -> dict | None:
+        """Optional band x feature attribution grid for GET /api/explain/policy."""
+        return None
+
     # ------------------------------------------------------------------ #
     def _decision(
         self,
@@ -44,6 +48,7 @@ class BaseScheduler(ABC):
         reasons: list[str] | None = None,
         alternatives: list[int] | None = None,
         explanation: str = "",
+        counterfactual: dict | None = None,
     ) -> ScanDecision:
         return ScanDecision(
             time_slot=context.time_slot,
@@ -51,6 +56,7 @@ class BaseScheduler(ABC):
             scheduler=self.name,
             confidence=float(max(0.0, min(1.0, confidence))),
             predicted_active=predicted_active,
+            counterfactual=counterfactual,
             reasons=(reasons or [])[:3],
             alternatives=[int(b) for b in (alternatives or [])][:3],
             explanation=explanation,

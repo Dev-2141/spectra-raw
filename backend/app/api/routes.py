@@ -1,11 +1,26 @@
-"""HTTP API for SPECTRA-SCAN AI."""
+"""HTTP API for SPECTRA-SCAN AI.
+
+``public_router`` carries only ``/api/health`` (unauthenticated). Everything on
+``router`` requires at least the ``viewer`` role (enforced at the router level);
+mutating endpoints additionally write an audit record.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ..audit.log import audit
+from ..auth.deps import Principal, Role, require_role
 from ..comparison.export import report_to_csv, report_to_html
-from ..reporting import run_report_to_csv, run_report_to_html
+from ..evidence import build_evidence_pack
+from ..metrics.split import metric_split
+from ..modes.manager import get_mode_manager
+from ..reporting import (
+    build_mission_report,
+    mission_report_to_html,
+    run_report_to_csv,
+    run_report_to_html,
+)
 from ..models.core import (
     ComparisonRequest,
     DatasetGenerateRequest,
@@ -15,19 +30,41 @@ from ..models.core import (
     StepRequest,
     TrainRequest,
 )
-from ..schedulers.registry import LEARNING_SCHEDULERS, list_schedulers
+from ..schedulers.registry import (
+    LEARNING_SCHEDULERS,
+    available_schedulers,
+    list_schedulers,
+    scheduler_requirements,
+)
 from .manager import get_manager
 
-router = APIRouter(prefix="/api", tags=["simulation"])
+public_router = APIRouter(prefix="/api", tags=["public"])
+
+router = APIRouter(
+    prefix="/api",
+    tags=["simulation"],
+    dependencies=[Depends(require_role(Role.viewer))],
+)
+
+_viewer = require_role(Role.viewer)
 
 
-@router.get("/health")
+def _mode() -> str:
+    return get_mode_manager().mode
+
+
+# --------------------------------------------------------------------------- #
+@public_router.get("/health")
 def health() -> dict:
     return {
         "status": "ok",
         "product": "SPECTRA-SCAN AI",
         "mode": "simulation-only / receive-only",
         "transmit_capability": False,
+        "hardware_mode": "receive_only",
+        "platform_mode": get_mode_manager().mode,
+        "auth": "enabled",
+        "version": "0.3.0",
     }
 
 
@@ -35,6 +72,8 @@ def health() -> dict:
 def schedulers() -> dict:
     return {
         "schedulers": list_schedulers(),
+        "available": available_schedulers(),
+        "requirements": scheduler_requirements(),
         "learning_schedulers": sorted(LEARNING_SCHEDULERS),
     }
 
@@ -50,27 +89,55 @@ def state() -> dict:
 
 
 @router.post("/simulation/reset")
-def simulation_reset(req: ResetRequest | None = None) -> dict:
+def simulation_reset(
+    req: ResetRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().reset(req or ResetRequest())
-    except KeyError as exc:
+        out = get_manager().reset(req or ResetRequest())
+    except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.reset",
+        detail={
+            "preset": getattr(req, "preset", None),
+            "scheduler": getattr(req, "scheduler", None),
+        },
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/step")
-def simulation_step(req: StepRequest | None = None) -> dict:
+def simulation_step(
+    req: StepRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or StepRequest()
     try:
-        return get_manager().step(body.count)
+        out = get_manager().step(body.count)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.step",
+        detail={"count": body.count},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/run")
-def simulation_run(req: RunRequest | None = None) -> dict:
+def simulation_run(
+    req: RunRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or RunRequest()
     try:
-        return get_manager().run(
+        out = get_manager().run(
             steps=body.steps,
             scheduler=body.scheduler,
             params=body.scheduler_params,
@@ -78,26 +145,60 @@ def simulation_run(req: RunRequest | None = None) -> dict:
         )
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.run",
+        detail={"steps": body.steps, "scheduler": body.scheduler, "reset": body.reset},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.post("/simulation/train")
-def simulation_train(req: TrainRequest | None = None) -> dict:
+def simulation_train(
+    req: TrainRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     body = req or TrainRequest()
     try:
-        return get_manager().train(body)
+        out = get_manager().train(body)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "simulation.train",
+        detail={
+            "scheduler": body.scheduler,
+            "episodes": body.episodes,
+            "steps_per_episode": body.steps_per_episode,
+        },
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Dataset lab
 # --------------------------------------------------------------------------- #
 @router.post("/dataset/generate")
-def dataset_generate(req: DatasetGenerateRequest | None = None) -> dict:
+def dataset_generate(
+    req: DatasetGenerateRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().generate_dataset(req or DatasetGenerateRequest())
+        out = get_manager().generate_dataset(req or DatasetGenerateRequest())
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "dataset.generate",
+        detail={"name": getattr(req, "name", None)},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.get("/dataset/list")
@@ -132,22 +233,46 @@ def dataset_preview(dataset_id: str) -> dict:
 
 
 @router.post("/dataset/{dataset_id}/load")
-def dataset_load(dataset_id: str, req: DatasetLoadRequest | None = None) -> dict:
+def dataset_load(
+    dataset_id: str,
+    req: DatasetLoadRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
     try:
-        return get_manager().load_dataset(dataset_id, req or DatasetLoadRequest())
+        out = get_manager().load_dataset(dataset_id, req or DatasetLoadRequest())
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "dataset.load",
+        target=dataset_id,
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Strategy comparison
 # --------------------------------------------------------------------------- #
 @router.post("/comparison/run")
-def comparison_run(req: ComparisonRequest | None = None) -> dict:
+def comparison_run(
+    req: ComparisonRequest | None = None,
+    principal: Principal = Depends(_viewer),
+) -> dict:
+    body = req or ComparisonRequest()
     try:
-        return get_manager().run_comparison(req or ComparisonRequest())
+        out = get_manager().run_comparison(body)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "comparison.run",
+        detail={"schedulers": list(body.schedulers), "steps": body.steps},
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return out
 
 
 @router.get("/comparison/last")
@@ -202,6 +327,65 @@ def report_run_export(fmt: str) -> Response:
     if fmt == "html":
         return Response(run_report_to_html(report), media_type="text/html")
     raise HTTPException(status_code=400, detail="format must be json, csv, or html")
+
+
+@router.get("/report/metrics/split")
+def report_metrics_split() -> dict:
+    """Canonical simulation-vs-live metric split with per-metric definitions."""
+    return metric_split()
+
+
+@router.get("/report/mission/{session_id}")
+def report_mission(session_id: str, baseline: int = 1) -> dict:
+    try:
+        return build_mission_report(session_id, with_baseline=bool(baseline))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/report/mission/{session_id}/export/{fmt}")
+def report_mission_export(session_id: str, fmt: str) -> Response:
+    try:
+        report = build_mission_report(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if fmt == "json":
+        import json
+
+        return Response(
+            json.dumps(report, indent=2, default=str),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename=mission_{session_id}.json"
+            },
+        )
+    if fmt == "html":
+        return Response(mission_report_to_html(report), media_type="text/html")
+    raise HTTPException(status_code=400, detail="format must be json or html")
+
+
+@router.get("/evidence/{session_id}")
+def evidence_pack(
+    session_id: str, principal: Principal = Depends(_viewer)
+) -> Response:
+    try:
+        blob = build_evidence_pack(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(
+        principal.username,
+        "evidence.export",
+        target=session_id,
+        mode=_mode(),
+        role=principal.role_name,
+    )
+    return Response(
+        blob,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=evidence_{session_id}.zip"
+        },
+    )
 
 
 @router.get("/comparison/export/{fmt}")

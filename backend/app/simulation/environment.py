@@ -83,10 +83,25 @@ class RFEnvironment:
         )
         self.events: list[EmitterEvent] = []
 
+        # Observed-vs-truth split: plain envs alias observed to the truth arrays;
+        # apply_ew_effects() replaces the observed arrays with mutated copies.
+        self.occupancy_observed = self.occupancy
+        self.snr_observed = self.snr_db
+        self.power_observed = self.power_db
+        self.noise_floor_map = None
+        self.is_synthetic_effect = None
+        self.effect_labels: list[dict] = []
+
         if prebuilt is not None:
             self._load_prebuilt(prebuilt)
+        elif config.emitter_specs:
+            self._generate_parametric()
         else:
             self._generate()
+
+        self.occupancy_observed = self.occupancy
+        self.snr_observed = self.snr_db
+        self.power_observed = self.power_db
 
     # ------------------------------------------------------------------ #
     def _load_prebuilt(self, pb: dict) -> None:
@@ -173,6 +188,49 @@ class RFEnvironment:
         self.power_db = self.power_db + ripple
 
         self._extract_events()
+
+    def _generate_parametric(self) -> None:
+        """Paint explicit :class:`EmitterSpec` objects (scenario editor)."""
+        from .emitters import paint_specs
+
+        cfg = self.config
+        meta = paint_specs(
+            occupancy=self.occupancy,
+            snr_db=self.snr_db,
+            power_db=self.power_db,
+            threat=self.threat,
+            emitter_id_matrix=self.emitter_id_matrix,
+            specs=list(cfg.emitter_specs or []),
+            noise_floor_db=self.noise_floor_db,
+            seed=cfg.seed,
+        )
+        self.emitters = [
+            Emitter(
+                id=m["id"],
+                label=m["label"],
+                behavior=m["behavior"],
+                home_band=m["home_band"],
+                threat=m["threat"],
+                high_priority=m["high_priority"],
+                snr_db=m["snr_db"],
+                duty_cycle=m["duty_cycle"],
+                params=m["params"],
+            )
+            for m in meta
+        ]
+        # Background ripple so an empty spectrum is not perfectly flat.
+        ripple = self.rng.normal(0.0, 0.6, size=self.power_db.shape).astype(np.float32)
+        idle = ~self.occupancy
+        self.power_db[idle] = (self.noise_floor_db + ripple)[idle]
+        self._extract_events()
+
+    def apply_ew_effects(self, effects: list) -> None:
+        """Overlay simulated EW effects onto the observed spectrum (sim only)."""
+        if not effects:
+            return
+        from . import ew_effects
+
+        ew_effects.apply_effects(self, effects)
 
     def _mark(self, emitter: Emitter, band: int, t0: int, t1: int) -> None:
         t0 = max(0, t0)

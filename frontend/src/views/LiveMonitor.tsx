@@ -66,7 +66,17 @@ export default function LiveMonitor({ sim }: { sim: SimControls }) {
 
       {/* right column: metrics + decision */}
       <div className="flex min-h-0 flex-col gap-2 overflow-y-auto">
-        <Panel title="Metrics (live)">
+        <Panel
+          title="Metrics (live)"
+          right={
+            s.df?.active ? (
+              <span className="text-[10px] text-rf-scan">
+                DF: {s.df.n_nodes} nodes
+                {s.df.mean_cep_km != null ? ` · CEP ~${s.df.mean_cep_km} km` : ""}
+              </span>
+            ) : undefined
+          }
+        >
           <div className="grid grid-cols-2 gap-1.5">
             <Stat label="P(detection)" value={m.probability_of_detection.toFixed(3)} tone="good" />
             <Stat label="false alarm rate" value={m.false_alarm_rate.toFixed(3)} tone={m.false_alarm_rate > 0.05 ? "bad" : undefined} />
@@ -80,6 +90,91 @@ export default function LiveMonitor({ sim }: { sim: SimControls }) {
             <Stat label="selected band" value={s.receiver.current_band} tone="scan" />
           </div>
         </Panel>
+
+        {s.online?.enabled && (
+          <Panel
+            title="Online learning"
+            right={
+              s.online.reverted ? (
+                <span className="rounded border border-rf-alert/50 px-1.5 py-0.5 text-[10px] text-rf-alert">
+                  reverted to priority @ t{s.online.reverted_at_slot}
+                </span>
+              ) : (
+                <span className="text-[10px] text-rf-accent">
+                  {s.online.active_scheduler} vs shadow
+                </span>
+              )
+            }
+          >
+            <div className="grid grid-cols-2 gap-1.5">
+              <Stat
+                label="policy reward EMA"
+                value={s.online.policy_reward_ema.toFixed(2)}
+                tone={
+                  s.online.policy_reward_ema >= s.online.shadow_reward_ema
+                    ? "good"
+                    : "bad"
+                }
+              />
+              <Stat
+                label="shadow (priority) EMA"
+                value={s.online.shadow_reward_ema.toFixed(2)}
+              />
+              <Stat label="breaches" value={s.online.breaches} tone="warn" />
+              <Stat label="updates" value={s.online.updates} />
+            </div>
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-rf-panel2">
+              <div
+                className={
+                  "h-full " +
+                  (s.online.policy_reward_ema >= s.online.shadow_reward_ema
+                    ? "bg-rf-accent"
+                    : "bg-rf-alert")
+                }
+                style={{
+                  width: `${Math.min(100, Math.max(4, 50 + (s.online.policy_reward_ema - s.online.shadow_reward_ema) * 10))}%`,
+                }}
+              />
+            </div>
+          </Panel>
+        )}
+
+        {s.effects?.has_effects && (
+          <Panel
+            title="Simulated EW effects (synthetic — no RF)"
+            right={
+              s.scenario ? (
+                <span className="text-[10px] text-rf-dim">{s.scenario}</span>
+              ) : undefined
+            }
+          >
+            <div className="grid grid-cols-2 gap-1.5">
+              <Stat
+                label="detection under effect"
+                value={
+                  s.effects.detection_under_effect_rate == null
+                    ? "—"
+                    : s.effects.detection_under_effect_rate.toFixed(3)
+                }
+                hint={`${s.effects.detection_under_effect_n ?? 0} jammed real slots`}
+                tone="warn"
+              />
+              <Stat
+                label="spoof deceptions"
+                value={s.effects.spoof_deception_count ?? 0}
+                hint="chased a decoy"
+                tone="bad"
+              />
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {(s.effects.effect_labels ?? []).map((fx, i) => (
+                <Badge key={i} tone="warn">
+                  {fx.kind}: {fx.label} · b{fx.band_lo}-{fx.band_hi}
+                </Badge>
+              ))}
+            </div>
+          </Panel>
+        )}
 
         <Panel title="Active decision">
           {last ? <DecisionCard step={last} /> : <Empty>step to see the scheduler reason</Empty>}

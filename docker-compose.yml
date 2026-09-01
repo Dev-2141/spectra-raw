@@ -1,0 +1,45 @@
+# SPECTRA-SCAN AI — one service, no external dependencies.
+#   docker compose up -d --build
+# Set a real JWT key and mount TLS certs before exposing this anywhere.
+
+services:
+  spectra:
+    build: .
+    image: spectra-scan-ai:local
+    restart: unless-stopped
+    ports:
+      - "8443:8000"
+    environment:
+      SPECTRA_PRODUCTION: "1"
+      SPECTRA_SEED_USERS: "0"
+      SPECTRA_SERVE_FRONTEND: "1"
+      SPECTRA_JWT_KEY: "${SPECTRA_JWT_KEY:?set a long random secret}"
+      SPECTRA_CORS_ORIGINS: "${SPECTRA_CORS_ORIGINS:-https://spectra.internal}"
+      SPECTRA_TLS_CERT: "/certs/cert.pem"
+      SPECTRA_TLS_KEY: "/certs/key.pem"
+      SPECTRA_DF_NODE_KEY: "${SPECTRA_DF_NODE_KEY:?set a LAN node key}"
+      SPECTRA_RETENTION_DAYS: "30"
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --ssl-certfile
+      - /certs/cert.pem
+      - --ssl-keyfile
+      - /certs/key.pem
+    volumes:
+      - spectra-data:/srv/spectra/data
+      - ./certs:/certs:ro
+    networks: [spectra]
+
+networks:
+  spectra:
+    internal: true   # no egress from the container network
+
+volumes:
+  spectra-data:

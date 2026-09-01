@@ -3,20 +3,88 @@
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
+// --- auth token plumbing --------------------------------------------------- //
+let _token: string | null = null;
+let _onUnauthorized: (() => void) | null = null;
+
+export function setAuthToken(token: string | null): void {
+  _token = token;
+}
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  _onUnauthorized = fn;
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra ?? {}) };
+  if (_token) h["Authorization"] = `Bearer ${_token}`;
+  return h;
+}
+
+async function guard(res: Response, path: string): Promise<void> {
+  if (res.ok) return;
+  if (res.status === 401) _onUnauthorized?.();
+  throw new Error(`${path} -> ${res.status} ${await res.text()}`);
+}
+
 async function jget<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`${path} -> ${res.status} ${await res.text()}`);
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  await guard(res, path);
   return res.json() as Promise<T>;
 }
 
 async function jpost<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body ?? {}),
   });
-  if (!res.ok) throw new Error(`${path} -> ${res.status} ${await res.text()}`);
+  await guard(res, path);
   return res.json() as Promise<T>;
+}
+
+async function jput<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body ?? {}),
+  });
+  await guard(res, path);
+  return res.json() as Promise<T>;
+}
+
+async function jdelete<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  await guard(res, path);
+  return res.json() as Promise<T>;
+}
+
+// Authenticated file fetch — <a href> can't carry the bearer token, so pull the
+// bytes with fetch() and hand the browser a blob URL instead.
+async function fetchBlob(path: string): Promise<Blob> {
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  await guard(res, path);
+  return res.blob();
+}
+
+export async function downloadAuthed(path: string, filename: string): Promise<void> {
+  const url = URL.createObjectURL(await fetchBlob(path));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+export async function openAuthed(path: string): Promise<void> {
+  const url = URL.createObjectURL(await fetchBlob(path));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 // --------------------------------------------------------------------------- //
@@ -24,6 +92,511 @@ export interface Health {
   status: string;
   mode: string;
   transmit_capability: boolean;
+  hardware_mode?: string;
+  platform_mode?: "simulation" | "live_es";
+  auth?: string;
+  version?: string;
+}
+
+export type Role = "viewer" | "analyst" | "operator" | "admin";
+export const ROLE_RANK: Record<Role, number> = {
+  viewer: 0,
+  analyst: 1,
+  operator: 2,
+  admin: 3,
+};
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  username: string;
+  role: Role;
+  demo: boolean;
+  must_change_password: boolean;
+  expires_in: number;
+}
+
+export interface MeResponse {
+  username: string;
+  role: Role;
+  demo: boolean;
+  must_change_password: boolean;
+}
+
+export interface PlatformMode {
+  mode: "simulation" | "live_es";
+  degraded: boolean;
+  since: string;
+  hardware_mode: string;
+  transmit_capability: boolean;
+}
+
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  actor: string;
+  role: string | null;
+  action: string;
+  target: string | null;
+  detail: unknown;
+  mode: string | null;
+}
+
+export interface PlatformUser {
+  username: string;
+  role: Role;
+  must_change_password: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- hardware / live path (Step 2) -------------------------------------- //
+export type SourceMode =
+  | "simulation"
+  | "file_replay"
+  | "rtl_power"
+  | "hackrf_sweep"
+  | "soapysdr";
+
+export interface HardwareConfig {
+  source_mode: SourceMode;
+  start_freq_hz: number;
+  stop_freq_hz: number;
+  bin_hz: number;
+  sweep_interval_ms: number;
+  gain_db?: number | null;
+  ppm?: number | null;
+  num_bands: number;
+  recording_id?: string | null;
+  replay_speed: number;
+  replay_loop: boolean;
+}
+
+export interface HardwareStatus {
+  source_mode: string;
+  running: boolean;
+  available: boolean;
+  device_label?: string | null;
+  frames_read: number;
+  last_frame_ts?: number | null;
+  frame_rate_hz: number;
+  buffer_len: number;
+  latest_seq: number;
+  error?: string | null;
+  recording: boolean;
+  recording_id?: string | null;
+  hardware_mode: string;
+  transmit_capability: boolean;
+  detail: string;
+}
+
+export interface HardwareDeviceInfo {
+  id: string;
+  label: string;
+  driver: string;
+  available: boolean;
+  receive_only: boolean;
+  note: string;
+}
+
+export interface RecordingMeta {
+  recording_id: string;
+  created_at: string;
+  name: string;
+  source: string;
+  device_label?: string | null;
+  start_freq_hz: number;
+  stop_freq_hz: number;
+  bin_hz: number;
+  frame_count: number;
+  duration_s: number;
+}
+
+export interface BandObservation {
+  band: number;
+  active: boolean;
+  power_dbm: number;
+  noise_floor_dbm: number;
+  snr_db: number;
+  confidence: number;
+}
+
+export interface SweepFrameDto {
+  ts: number;
+  seq: number;
+  f_start_hz: number;
+  f_stop_hz: number;
+  bin_hz: number;
+  power_dbm: number[];
+  source: string;
+}
+
+// --- scenarios & simulated EW effects (Step 3) ------------------------- //
+export interface EWEffectSpec {
+  kind:
+    | "barrage_noise"
+    | "spot_jam"
+    | "swept_jam"
+    | "repeater_ghost"
+    | "spoof_track";
+  label: string;
+  start_slot: number;
+  stop_slot: number;
+  band_lo: number;
+  band_hi: number;
+  power_db: number;
+  sweep_rate_bands_per_slot: number;
+  source_band: number;
+  target_band: number;
+  delay_slots: number;
+  spoof_period_slots: number;
+  spoof_pulse_slots: number;
+  spoof_snr_db: number;
+}
+
+export interface Scenario {
+  scenario_id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+  environment: EnvironmentConfig & {
+    high_priority_fraction?: number;
+    behavior_weights?: Record<string, number> | null;
+  };
+  receiver: ReceiverConfig;
+  effects: EWEffectSpec[];
+}
+
+export interface ScenarioSaveBody {
+  name: string;
+  description?: string;
+  tags?: string[];
+  environment: Scenario["environment"];
+  receiver: ReceiverConfig;
+  effects: EWEffectSpec[];
+}
+
+export interface EffectMetrics {
+  has_effects: boolean;
+  effect_labels?: Array<{
+    kind: string;
+    label: string;
+    start_slot: number;
+    stop_slot: number;
+    band_lo: number;
+    band_hi: number;
+  }>;
+  synthetic_scans?: number;
+  detection_under_effect_rate?: number | null;
+  detection_under_effect_n?: number;
+  spoof_deception_count?: number;
+}
+
+export interface MetricAggregate {
+  metric: string;
+  mean: number;
+  std: number;
+  ci95_low: number;
+  ci95_high: number;
+  n: number;
+}
+
+export interface MonteCarloEntry {
+  scheduler: string;
+  aggregates: MetricAggregate[];
+  win_rate: number;
+}
+
+export interface MonteCarloReport {
+  montecarlo_id: string;
+  created_at: string;
+  scenario_id: string | null;
+  scenario_name: string;
+  schedulers: string[];
+  seeds: number[];
+  steps: number;
+  number_of_bands: number;
+  entries: MonteCarloEntry[];
+  ranking: string[];
+  winner: string;
+}
+
+// --- signal analysis, library, tasking, alerts (Step 4) --------------- //
+export interface EmitterTrack {
+  track_id: string;
+  first_seen: number;
+  last_seen: number;
+  age_slots: number;
+  idle_slots: number;
+  bands: number[];
+  primary_band: number;
+  run_count: number;
+  active_slots: number;
+  threat: number;
+  high_priority: boolean;
+  is_synthetic_effect: boolean;
+  freq_behavior: string;
+  spectral_shape: string;
+  class: string;
+  class_confidence: number;
+  class_probabilities: Record<string, number>;
+  modulation: string;
+  pri_estimate: number;
+  pri_jitter: number;
+  duty_cycle: number;
+  snr_mean_db: number;
+  features: Record<string, number | string>;
+  library_matches: Array<{
+    entry_id: string;
+    name: string;
+    behavior: string;
+    modulation: string;
+    threat: number;
+    score: number;
+  }>;
+}
+
+export interface AnomalyReport {
+  baseline_slots: number;
+  ready: boolean;
+  flags: Array<{ time_slot: number; band: number; kind: string; z: number }>;
+  anomalous_bands: number[];
+}
+
+export interface ForecastReport {
+  time_slot: number;
+  forecast: Array<{
+    track_id: string;
+    band: number;
+    pri_slots: number;
+    pri_jitter: number;
+    next_slots: number[];
+    slots_until_next: number;
+    confidence: number;
+  }>;
+}
+
+export interface LibraryEntry {
+  entry_id: string;
+  name: string;
+  synthetic: boolean;
+  freq_lo_mhz: number;
+  freq_hi_mhz: number;
+  home_band: number;
+  behavior: string;
+  modulation: string;
+  pri_slots: number;
+  pri_jitter: number;
+  hop_span_bands: number;
+  duty_cycle: number;
+  threat: number;
+  notes: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LibraryEntryBody {
+  name: string;
+  freq_lo_mhz?: number;
+  freq_hi_mhz?: number;
+  home_band?: number;
+  behavior: string;
+  modulation?: string;
+  pri_slots?: number;
+  pri_jitter?: number;
+  hop_span_bands?: number;
+  duty_cycle?: number;
+  threat: number;
+  notes?: string;
+}
+
+export interface LibraryRevisionRow {
+  entry_id: string;
+  revision: number;
+  action: string;
+  actor: string;
+  ts: string;
+  snapshot: Record<string, unknown>;
+}
+
+export interface WatchListItem {
+  id: string;
+  name: string;
+  band_lo: number;
+  band_hi: number;
+  weight: number;
+  enabled: boolean;
+}
+
+export interface AlertRuleItem {
+  id: string;
+  kind: string;
+  enabled: boolean;
+  severity: string;
+  threshold: number;
+}
+
+export interface AlertItem {
+  alert_id: string;
+  ts: string;
+  rule_kind: string;
+  severity: string;
+  track_id: string | null;
+  band: number | null;
+  detail: string;
+  state: "open" | "ack" | "closed";
+}
+
+// --- direction finding / geolocation (Step 5) ------------------------- //
+export interface ReceiverNode {
+  node_id: string;
+  name: string;
+  x_km: number;
+  y_km: number;
+  sync_source: string;
+  sync_quality: number;
+  timing_error_ns: number;
+  bearing_error_deg: number;
+  last_seen_slot: number;
+  healthy: boolean;
+  kind: string;
+}
+
+export interface GeoFix {
+  track_id: string;
+  time_slot: number;
+  est_x_km: number;
+  est_y_km: number;
+  true_x_km: number | null;
+  true_y_km: number | null;
+  ellipse_a_km: number;
+  ellipse_b_km: number;
+  ellipse_theta_deg: number;
+  cep_km: number;
+  error_km: number | null;
+  n_nodes: number;
+  method: string;
+  solvable: boolean;
+}
+
+export interface DFHealth {
+  nodes: Array<{
+    node_id: string;
+    name: string;
+    sync_source: string;
+    sync_quality: number;
+    timing_sigma_ns: number;
+    bearing_error_deg: number;
+    healthy: boolean;
+    last_seen_slot: number;
+    kind: string;
+    x_km: number;
+    y_km: number;
+  }>;
+  node_count: number;
+  healthy_nodes: number;
+  fix_count: number;
+  rmse_km: number | null;
+  mean_cep_km: number | null;
+}
+
+export interface DFSummary {
+  active: boolean;
+  n_nodes: number;
+  fixes: number;
+  mean_cep_km: number | null;
+}
+
+// --- RL / online learning / sim-to-real / explain++ (Step 6) --------- //
+export interface RLJob {
+  job_id: string;
+  scheduler: string;
+  status: "queued" | "running" | "done" | "failed";
+  created_at: string;
+  updated_at: string;
+  episodes: number;
+  episodes_done: number;
+  curriculum: boolean;
+  stage: string | null;
+  learning_curve: number[];
+  curriculum_stages: Array<{ stage: string; first: number; last: number; mean: number }>;
+  best_avg_reward: number | null;
+  final_avg_reward: number | null;
+  checkpoint: string | null;
+  error: string | null;
+  promoted: boolean;
+}
+
+export interface OnlineStatus {
+  enabled: boolean;
+  active_scheduler: string;
+  shadow_scheduler: string;
+  policy_reward_ema: number;
+  shadow_reward_ema: number;
+  margin: number;
+  window: number;
+  breaches: number;
+  reverted: boolean;
+  reverted_at_slot: number | null;
+  updates: number;
+}
+
+export interface CalibrationProfile {
+  profile_id: string;
+  name: string;
+  recording_id: string;
+  created_at: string;
+  num_bands: number;
+  noise_floor_db: number;
+  emitter_density: number;
+  snr_min_db: number;
+  snr_max_db: number;
+  false_alarm_prob: number;
+  stats: Record<string, number>;
+}
+
+export interface RealityGapReport {
+  recording_id: string;
+  profile_id: string;
+  scheduler: string;
+  steps: number;
+  metrics: Array<{
+    metric: string;
+    recording_value: number;
+    sim_value: number;
+    gap: number;
+  }>;
+  gap_score: number;
+  narrative: string;
+}
+
+export interface PolicyGrid {
+  available: boolean;
+  scheduler?: string;
+  features?: string[];
+  bands?: number[];
+  grid?: number[][];
+  scores?: number[];
+  q_values?: number[];
+  detail?: string;
+}
+
+export interface SessionRow {
+  session_id: string;
+  name: string;
+  tags: string[];
+  mode: string;
+  scenario: string;
+  scheduler: string;
+  started_at: string;
+  finished_at: string;
+  status: string;
+  row_counts: Record<string, number>;
+  schema_version: number;
 }
 
 export interface Metrics {
@@ -116,6 +689,9 @@ export interface ScanPathRow {
 export interface SimState {
   product: string;
   mode: string;
+  platform?: PlatformMode;
+  protected_bands?: number[];
+  protected_override_count?: number;
   running: boolean;
   done: boolean;
   time_slot: number;
@@ -124,6 +700,11 @@ export interface SimState {
   available_schedulers: string[];
   dataset_id: string | null;
   preset: string | null;
+  scenario?: string | null;
+  effects?: EffectMetrics;
+  unacked_alerts?: number;
+  df?: DFSummary;
+  online?: OnlineStatus;
   replay_mode: boolean;
   environment: {
     num_bands: number;
@@ -147,11 +728,17 @@ export interface SimState {
     time_slot: number;
     power_db: number[];
     active: number[];
+    synthetic_effect?: number[] | null;
     threshold_db: number;
     threat_prior: number[];
     predicted_activity: number[];
   };
-  waterfall: { start_slot: number; power_db: number[][]; active: number[][] };
+  waterfall: {
+    start_slot: number;
+    power_db: number[][];
+    active: number[][];
+    synthetic_effect?: number[][] | null;
+  };
   scan_path: ScanPathRow[];
   reward_series: Array<{ time_slot: number; reward: number }>;
   metrics: Metrics;
@@ -246,6 +833,11 @@ export interface ExplainRow {
   reasons: string[];
   alternatives: number[];
   explanation: string;
+  counterfactual?: {
+    alt_band: number;
+    flip_factor: string;
+    margin: number;
+  } | null;
   reward_breakdown: Record<string, number>;
 }
 
@@ -262,6 +854,82 @@ export interface RunReport {
   steps_run: number;
   metrics: Metrics;
   recent_decisions: ExplainRow[];
+}
+
+// --- Step 8: metric split, mission report, evidence pack --------------- //
+export interface MetricDef {
+  name: string;
+  definition: string;
+}
+export interface MetricSplit {
+  simulation: MetricDef[];
+  live: MetricDef[];
+  note: string;
+}
+
+export interface MissionReport {
+  product: string;
+  kind: string;
+  schema_version: number;
+  generated_at: string;
+  session: {
+    session_id: string;
+    name: string;
+    tags: string[];
+    mode: string;
+    scenario: string;
+    scheduler: string;
+    started_at: string;
+    finished_at: string;
+    row_counts: Record<string, number>;
+  };
+  summary: {
+    steps: number;
+    detections: number;
+    false_alarms: number;
+    total_reward: number;
+    average_reward: number;
+  };
+  metrics: {
+    mode_applicability: string;
+    simulation: Array<{ name: string; value: number | string; definition: string }>;
+    live: Array<{ name: string; value: number | string; definition: string }>;
+  };
+  timeline: Array<{
+    time_slot: number;
+    selected_band: number;
+    detected: boolean;
+    false_alarm: boolean;
+    reward: number;
+  }>;
+  reward_series: number[];
+  scheduler_vs_baseline: {
+    scenario: string;
+    seeds: number[];
+    steps: number;
+    winner: string;
+    rows: Array<{
+      scheduler: string;
+      average_reward: { mean: number; ci95: number };
+      interception_ratio: { mean: number; ci95: number };
+      high_priority_detection_rate: { mean: number; ci95: number };
+    }>;
+    adaptive_minus_baseline: {
+      average_reward: number;
+      interception_ratio: number;
+      high_priority_detection_rate: number;
+    } | null;
+  } | null;
+  tracks: Array<Record<string, unknown>>;
+  df_fixes: { fixes: Array<Record<string, unknown>>; mean_cep_km: number | null; n: number };
+  alerts: {
+    total: number;
+    by_state: Record<string, number>;
+    by_severity: Record<string, number>;
+    items: Array<Record<string, unknown>>;
+  };
+  assumptions: string[];
+  limitations: string[];
 }
 
 export interface ResetBody {
@@ -283,6 +951,204 @@ export interface Preset {
 export const api = {
   health: () => jget<Health>("/api/health"),
   state: () => jget<SimState>("/api/state"),
+
+  // --- auth ---------------------------------------------------------------- //
+  login: (username: string, password: string) =>
+    jpost<TokenResponse>("/api/auth/login", { username, password }),
+  demo: () => jpost<TokenResponse>("/api/auth/demo"),
+  quickLogin: (role: Role) =>
+    jpost<TokenResponse>("/api/auth/quick-login", { role }),
+  authConfig: () =>
+    jget<{
+      quick_login_enabled: boolean;
+      demo_enabled: boolean;
+      roles: Role[];
+      seed_convention: string | null;
+    }>("/api/auth/config"),
+  me: () => jget<MeResponse>("/api/auth/me"),
+  logout: () => jpost<{ ok: boolean }>("/api/auth/logout"),
+  changePassword: (current_password: string, new_password: string) =>
+    jpost<{ ok: boolean }>("/api/auth/change-password", {
+      current_password,
+      new_password,
+    }),
+
+  // --- platform: mode / audit / protected bands -------------------------- //
+  getMode: () => jget<PlatformMode>("/api/mode"),
+  setMode: (mode: "simulation" | "live_es") =>
+    jpost<PlatformMode>("/api/mode", { mode, confirm: true }),
+  audit: (params?: { actor?: string; action?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.actor) q.set("actor", params.actor);
+    if (params?.action) q.set("action", params.action);
+    q.set("limit", String(params?.limit ?? 200));
+    return jget<{ entries: AuditEntry[] }>(`/api/audit?${q.toString()}`);
+  },
+  getProtectedBands: () =>
+    jget<{ protected_bands: number[] }>("/api/tasking/protected-bands"),
+  setProtectedBands: (bands: number[]) =>
+    jpost<{ protected_bands: number[] }>("/api/tasking/protected-bands", { bands }),
+
+  // --- admin: users ----------------------------------------------------- //
+  users: () => jget<{ users: PlatformUser[]; roles: Role[] }>("/api/auth/users"),
+  createUser: (username: string, password: string, role: Role) =>
+    jpost<{ username: string; role: Role }>("/api/auth/users", {
+      username,
+      password,
+      role,
+    }),
+  setUserRole: (username: string, role: Role) =>
+    jpost<{ username: string; role: Role }>(
+      `/api/auth/users/${encodeURIComponent(username)}/role`,
+      { role },
+    ),
+  resetUserPassword: (username: string, new_password: string) =>
+    jpost<{ ok: boolean }>(
+      `/api/auth/users/${encodeURIComponent(username)}/reset-password`,
+      { new_password },
+    ),
+  deleteUser: (username: string) =>
+    jdelete<{ ok: boolean }>(`/api/auth/users/${encodeURIComponent(username)}`),
+
+  // --- hardware / live path ------------------------------------------- //
+  hwStatus: () => jget<HardwareStatus>("/api/hardware/status"),
+  hwDevices: () =>
+    jget<{ devices: HardwareDeviceInfo[] }>("/api/hardware/devices"),
+  hwConfig: (config: HardwareConfig) =>
+    jpost<Record<string, unknown>>("/api/hardware/config", config),
+  hwStart: (config?: Partial<HardwareConfig>) =>
+    jpost<HardwareStatus>("/api/hardware/start", config ? { config } : {}),
+  hwStop: () => jpost<HardwareStatus>("/api/hardware/stop"),
+  hwFrames: (since = -1) =>
+    jget<{
+      frames: SweepFrameDto[];
+      latest_seq: number;
+      observations: BandObservation[];
+    }>(`/api/hardware/frames?since=${since}`),
+  hwRecordings: () =>
+    jget<{ recordings: RecordingMeta[] }>("/api/hardware/recordings"),
+  hwRecordStart: (name?: string) =>
+    jpost<{ recording_id: string; recording: boolean }>(
+      "/api/hardware/record/start",
+      { name },
+    ),
+  hwRecordStop: () => jpost<RecordingMeta>("/api/hardware/record/stop"),
+
+  // --- scenarios ------------------------------------------------------- //
+  scenarios: () => jget<{ scenarios: Scenario[] }>("/api/scenario"),
+  scenarioGet: (id: string) =>
+    jget<Scenario>(`/api/scenario/${encodeURIComponent(id)}`),
+  scenarioCreate: (body: ScenarioSaveBody) =>
+    jpost<Scenario>("/api/scenario", body),
+  scenarioUpdate: (id: string, body: ScenarioSaveBody) =>
+    jput<Scenario>(`/api/scenario/${encodeURIComponent(id)}`, body),
+  scenarioDuplicate: (id: string) =>
+    jpost<Scenario>(`/api/scenario/${encodeURIComponent(id)}/duplicate`),
+  scenarioDelete: (id: string) =>
+    jdelete<{ ok: boolean }>(`/api/scenario/${encodeURIComponent(id)}`),
+  scenarioLoad: (id: string) =>
+    jpost<SimState>(`/api/scenario/${encodeURIComponent(id)}/load`),
+
+  // --- monte carlo --------------------------------------------------- //
+  montecarloRun: (body: {
+    scenario_id?: string | null;
+    schedulers: string[];
+    n_seeds: number;
+    steps: number;
+  }) => jpost<MonteCarloReport>("/api/montecarlo/run", body),
+  montecarloExportUrl: (id: string, fmt: "json" | "csv" | "html") =>
+    `${BASE}/api/montecarlo/${id}/export/${fmt}`,
+
+  // --- signal analysis --------------------------------------------- //
+  tracks: () => jget<{ tracks: EmitterTrack[]; time_slot: number }>("/api/tracks"),
+  track: (id: string) => jget<EmitterTrack>(`/api/tracks/${encodeURIComponent(id)}`),
+  anomaly: () => jget<AnomalyReport>("/api/anomaly"),
+  forecast: () => jget<ForecastReport>("/api/forecast"),
+
+  // --- library --------------------------------------------------- //
+  library: () => jget<{ entries: LibraryEntry[] }>("/api/library"),
+  libraryRevisions: (id: string) =>
+    jget<{ revisions: LibraryRevisionRow[] }>(
+      `/api/library/${encodeURIComponent(id)}/revisions`,
+    ),
+  libraryCreate: (body: LibraryEntryBody) =>
+    jpost<LibraryEntry>("/api/library", body),
+  libraryUpdate: (id: string, body: LibraryEntryBody) =>
+    jput<LibraryEntry>(`/api/library/${encodeURIComponent(id)}`, body),
+  libraryDelete: (id: string) =>
+    jdelete<{ ok: boolean }>(`/api/library/${encodeURIComponent(id)}`),
+
+  // --- tasking + alerts ---------------------------------------- //
+  watchLists: () => jget<{ watch_lists: WatchListItem[] }>("/api/tasking/watchlists"),
+  setWatchLists: (watch_lists: WatchListItem[]) =>
+    jpost<{ watch_lists: WatchListItem[] }>("/api/tasking/watchlists", { watch_lists }),
+  alertRules: () => jget<{ alert_rules: AlertRuleItem[] }>("/api/tasking/alert-rules"),
+  setAlertRules: (alert_rules: AlertRuleItem[]) =>
+    jpost<{ alert_rules: AlertRuleItem[] }>("/api/tasking/alert-rules", { alert_rules }),
+  alerts: (state?: string) =>
+    jget<{ alerts: AlertItem[]; unacked: number }>(
+      `/api/alerts${state ? `?state=${state}` : ""}`,
+    ),
+  ackAlert: (id: string) => jpost<AlertItem>(`/api/alerts/${id}/ack`),
+  closeAlert: (id: string) => jpost<AlertItem>(`/api/alerts/${id}/close`),
+
+  // --- direction finding ------------------------------------------- //
+  dfNodes: () => jget<{ nodes: ReceiverNode[] }>("/api/df/nodes"),
+  setDfNodes: (nodes: Partial<ReceiverNode>[]) =>
+    jpost<{ nodes: ReceiverNode[] }>("/api/df/nodes", { nodes }),
+  dfFixes: () =>
+    jget<{ fixes: GeoFix[]; summary: DFSummary; time_slot: number }>("/api/df/fixes"),
+  dfFix: (trackId: string) =>
+    jget<GeoFix & { history: Array<{ time_slot: number; x_km: number; y_km: number }> }>(
+      `/api/df/fixes/${encodeURIComponent(trackId)}`,
+    ),
+  dfHealth: () => jget<DFHealth>("/api/df/health"),
+
+  // --- RL training / online / sim-to-real / explain++ ------------- //
+  rlTrain: (body: {
+    scheduler: string;
+    episodes: number;
+    steps_per_episode: number;
+    curriculum: boolean;
+    scenario_id?: string | null;
+  }) => jpost<RLJob>("/api/rl/train", body),
+  rlJobs: () => jget<{ jobs: RLJob[] }>("/api/rl/jobs"),
+  rlJob: (id: string) => jget<RLJob>(`/api/rl/jobs/${id}`),
+  rlPromote: (id: string) => jpost<RLJob>(`/api/rl/jobs/${id}/promote`),
+
+  onlineEnable: (body: { scheduler: string; margin: number; window: number }) =>
+    jpost<OnlineStatus>("/api/online/enable", body),
+  onlineDisable: () => jpost<OnlineStatus>("/api/online/disable"),
+  onlineStatus: () => jget<OnlineStatus>("/api/online/status"),
+
+  explainPolicy: () => jget<PolicyGrid>("/api/explain/policy"),
+
+  s2rCalibrate: (recording_id: string, name?: string) =>
+    jpost<CalibrationProfile>("/api/sim2real/calibrate", { recording_id, name }),
+  s2rProfiles: () =>
+    jget<{ profiles: CalibrationProfile[] }>("/api/sim2real/profiles"),
+  s2rGap: (body: {
+    recording_id: string;
+    profile_id: string;
+    scheduler: string;
+    steps: number;
+    noise_shift_db: number;
+  }) => jpost<RealityGapReport>("/api/sim2real/gap", body),
+
+  // --- durable sessions ------------------------------------------- //
+  sessions: () => jget<{ sessions: SessionRow[] }>("/api/sessions"),
+  sessionStart: (name: string, tags: string[]) =>
+    jpost<{ session_id: string; recording: boolean }>("/api/sessions/start", {
+      name,
+      tags,
+    }),
+  sessionFinish: () => jpost<SessionRow>("/api/sessions/finish"),
+  sessionData: (id: string, kind: string) =>
+    jget<{ rows: Array<Record<string, unknown>> }>(
+      `/api/sessions/${id}/data/${kind}`,
+    ),
+  sessionExportUrl: (id: string) => `${BASE}/api/sessions/${id}/export`,
+
   schedulers: () =>
     jget<{ schedulers: string[]; learning_schedulers: string[] }>("/api/schedulers"),
   presets: () => jget<{ presets: Preset[] }>("/api/presets"),
@@ -328,6 +1194,17 @@ export const api = {
   runReport: () => jget<RunReport>("/api/report/run"),
   runReportExportUrl: (fmt: "json" | "csv" | "html") =>
     `${BASE}/api/report/run/export/${fmt}`,
+
+  // --- Step 8: metric split / mission report / evidence pack ---------- //
+  metricsSplit: () => jget<MetricSplit>("/api/report/metrics/split"),
+  missionReport: (sessionId: string, baseline = true) =>
+    jget<MissionReport>(
+      `/api/report/mission/${encodeURIComponent(sessionId)}?baseline=${baseline ? 1 : 0}`,
+    ),
+  missionReportExportUrl: (sessionId: string, fmt: "json" | "html") =>
+    `${BASE}/api/report/mission/${encodeURIComponent(sessionId)}/export/${fmt}`,
+  evidencePackUrl: (sessionId: string) =>
+    `${BASE}/api/evidence/${encodeURIComponent(sessionId)}`,
 };
 
 export const ALL_SCHEDULERS = [
