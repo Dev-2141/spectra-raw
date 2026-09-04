@@ -13,7 +13,7 @@ look at next**, how long to dwell, and how to learn from what it hears.
   (`rtl_power`, `hackrf_sweep` RX, SoapySDR RX) or a recorded sweep file. No
   ground truth, so a separate *proxy* metric set applies.
 
-> ## Safety & scope — load-bearing
+> ## Safety & scope — load-bearing.
 >
 > This platform is **receive-only in hardware** and **transmit-only in
 > simulation**.
